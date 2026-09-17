@@ -1,0 +1,113 @@
+# Flatpak manifest — the primary distribution format.
+#
+# Flatpak first because it is the only format that works identically on Ubuntu,
+# Fedora, Arch, Mint and the immutable distributions, and because it gives the
+# sandbox a meaningful permission set rather than full access to the machine.
+app-id: io.hopdesk.HopDesk
+runtime: org.freedesktop.Platform
+runtime-version: '25.08'
+sdk: org.freedesktop.Sdk
+base: org.electronjs.Electron2.BaseApp
+base-version: '25.08'
+command: hopdesk
+separate-locales: false
+# The Freedesktop SDK has no Node.js; the extension provides it at build time only.
+sdk-extensions:
+  - org.freedesktop.Sdk.Extension.node20
+
+finish-args:
+  - --share=ipc
+  - --socket=x11
+  - --socket=wayland
+  - --device=dri
+  # Outbound network only: this is a client, it never listens.
+  - --share=network
+  # Audio for RDP and SPICE session sound.
+  - --socket=pulseaudio
+  # The system keyring, so passwords are held by GNOME Keyring or KWallet
+  # rather than our own file vault.
+  - --talk-name=org.freedesktop.secrets
+  # Folder redirection: the user picks a directory through the portal, so no
+  # blanket filesystem access is granted.
+  - --filesystem=xdg-download
+  - --talk-name=org.freedesktop.portal.FileChooser
+
+modules:
+  # FreeRDP provides RDP. Built into the sandbox so RDP works out of the box
+  # rather than depending on what the host happens to have installed.
+  - name: freerdp
+    buildsystem: cmake-ninja
+    # FreeRDP 3 refuses in-source builds.
+    builddir: true
+    config-opts:
+      - -DCMAKE_BUILD_TYPE=Release
+      # Only the X11 client (xfreerdp3) is needed: no servers, samples, SDL
+      # client or manual pages.
+      - -DWITH_CLIENT_SDL=OFF
+      - -DWITH_CLIENT_SDL3=OFF
+      - -DWITH_SERVER=OFF
+      - -DWITH_SHADOW=OFF
+      - -DWITH_PROXY=OFF
+      - -DWITH_PLATFORM_SERVER=OFF
+      - -DWITH_SAMPLE=OFF
+      - -DWITH_MANPAGES=OFF
+      - -DWITH_X11=ON
+      - -DWITH_PULSE=ON
+      - -DWITH_ALSA=OFF
+      - -DWITH_OSS=OFF
+      # Not in the SDK, or not wanted in the sandbox: printing, smartcards,
+      # Kerberos, Azure AD sign-in (needs a web view), FUSE file clipboard,
+      # USB redirection (libusb), and FFmpeg/OpenH264 video codecs.
+      - -DWITH_CUPS=OFF
+      - -DWITH_SMARTCARD_PCSC=OFF
+      - -DWITH_KRB5=OFF
+      - -DWITH_AAD=OFF
+      - -DWITH_WEBVIEW=OFF
+      - -DWITH_FUSE=OFF
+      - -DCHANNEL_URBDRC=OFF
+      - -DWITH_FFMPEG=OFF
+      - -DWITH_DSP_FFMPEG=OFF
+      - -DWITH_VIDEO_FFMPEG=OFF
+      - -DWITH_SWSCALE=OFF
+      - -DWITH_OPENH264=OFF
+    sources:
+      # FreeRDP 3, the maintained release line (FreeRDP 2 no longer builds with
+      # the CMake in current SDKs). The checksum matches the one published with
+      # the release (freerdp-3.31.1.tar.gz.sha256).
+      - type: archive
+        url: https://github.com/FreeRDP/FreeRDP/releases/download/3.31.1/freerdp-3.31.1.tar.gz
+        sha256: 4a2629026896cb4e26fb8ed2d6ca6aa4ab89ca95528dfbae2550c2f6bc866991
+
+  - name: hopdesk
+    buildsystem: simple
+    build-options:
+      append-path: /usr/lib/sdk/node20/bin
+      env:
+        # Flatpak builds have no network: npm and Electron's downloader are fed
+        # from generated-sources.json (see the comment on that source below).
+        npm_config_nodedir: /usr/lib/sdk/node20
+        npm_config_offline: 'true'
+        npm_config_cache: /run/build/hopdesk/flatpak-node/npm-cache
+        XDG_CACHE_HOME: /run/build/hopdesk/flatpak-node/cache
+    build-commands:
+      - npm ci --offline
+      - npm run build
+      - cp -r . /app/hopdesk
+      - install -Dm755 packaging/hopdesk.sh /app/bin/hopdesk
+      - install -Dm644 packaging/io.hopdesk.HopDesk.desktop /app/share/applications/io.hopdesk.HopDesk.desktop
+      - install -Dm644 packaging/io.hopdesk.HopDesk.metainfo.xml /app/share/metainfo/io.hopdesk.HopDesk.metainfo.xml
+      - install -Dm644 packaging/icon.svg /app/share/icons/hicolor/scalable/apps/io.hopdesk.HopDesk.svg
+      - install -Dm644 packaging/icon.png /app/share/icons/hicolor/512x512/apps/io.hopdesk.HopDesk.png
+    sources:
+      - type: dir
+        path: ..
+        skip:
+          - node_modules
+          - build
+          - .flatpak-builder
+          - dist-packages
+      # Every npm package and the Electron binary, with checksums. Regenerate
+      # whenever package-lock.json changes:
+      #   flatpak-node-generator npm package-lock.json --electron-node-headers \
+      #     -o packaging/generated-sources.json
+      - generated-sources.json

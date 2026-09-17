@@ -1,0 +1,20 @@
+{
+  "name": "@hopdesk/crypto",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "scripts": {
+    "build": "tsc -p .",
+    "test": "node --test --test-concurrency=1 test/*.test.mjs"
+  },
+  "dependencies": {
+    "@noble/curves": "^2.4.0",
+    "@noble/hashes": "^2.4.0"
+  },
+  "devDependencies": {
+    "@types/node": "^22.10.2",
+    "typescript": "^5.7.2"
+  }
+}

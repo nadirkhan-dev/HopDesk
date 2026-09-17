@@ -1,0 +1,54 @@
+# electron-builder configuration for the AppImage and .deb packages.
+# Used by packaging/build-appimage.sh; kept in a file because the command-line
+# form of nested options changes between electron-builder releases.
+appId: io.hopdesk.HopDesk
+productName: HopDesk
+executableName: hopdesk
+directories:
+  output: dist-packages
+  buildResources: packaging
+
+# The workspace root has no "main"; point the packaged app at the desktop entry.
+# Electron decides whether to load the entry as an ES module from the app's
+# root package.json, so the packaged copy must say "type": "module" too;
+# without it the app dies at launch with ERR_REQUIRE_ESM.
+extraMetadata:
+  main: apps/desktop/dist/main.js
+  type: module
+  description: A remote desktop client for Linux
+  author:
+    name: HopDesk contributors
+    email: hopdesk@users.noreply.github.com
+
+files:
+  - package.json
+  # Each package.json is required at runtime: they carry "type": "module",
+  # without which main.js fails to load.
+  - apps/desktop/package.json
+  - apps/desktop/dist/**
+  - apps/desktop/renderer/**
+  # @hopdesk/core is an npm workspace, i.e. a symlink electron-builder does not
+  # follow. It has no runtime dependencies, so its build is copied to where
+  # Node's resolution from main.js finds it.
+  - from: packages/core
+    to: node_modules/@hopdesk/core
+    filter: [package.json, dist/**]
+  - "!**/*.map"
+  - "!**/test/**"
+
+linux:
+  category: Network
+  icon: packaging/icon.png
+  maintainer: HopDesk contributors <hopdesk@users.noreply.github.com>
+  synopsis: Remote desktop client for VNC, RDP and SPICE
+  desktop:
+    entry:
+      Name: HopDesk
+      GenericName: Remote Desktop Client
+      Keywords: remote;desktop;vnc;rdp;spice;
+      StartupWMClass: HopDesk
+
+deb:
+  # FreeRDP is what RDP sessions run on. Recommended rather than required so
+  # the package still installs where only VNC is wanted.
+  recommends: [freerdp2-x11 | freerdp3-x11, libsecret-tools]

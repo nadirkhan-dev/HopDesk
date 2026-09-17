@@ -1,0 +1,32 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<component type="desktop-application">
+  <id>io.hopdesk.HopDesk</id>
+  <name>HopDesk</name>
+  <summary>Control another computer from Linux</summary>
+  <metadata_license>CC0-1.0</metadata_license>
+  <project_license>GPL-3.0-or-later</project_license>
+  <developer id="io.hopdesk"><name>HopDesk</name></developer>
+
+  <description>
+    <p>
+      HopDesk connects you to Windows, macOS, Linux and virtual machines from
+      your Linux desktop. Save the computers you use, and connect with one
+      click.
+    </p>
+    <ul>
+      <li>VNC for macOS, Linux, Raspberry Pi and NAS devices</li>
+      <li>RDP for Windows, powered by FreeRDP</li>
+      <li>SPICE for QEMU and libvirt virtual machines</li>
+      <li>Passwords stored in your system keyring, never in plain text</li>
+      <li>Automatic reconnect when the network drops</li>
+    </ul>
+  </description>
+
+  <launchable type="desktop-id">io.hopdesk.HopDesk.desktop</launchable>
+  <content_rating type="oars-1.1"/>
+  <releases>
+    <release version="0.1.0" date="2026-09-16">
+      <description><p>First release.</p></description>
+    </release>
+  </releases>
+</component>

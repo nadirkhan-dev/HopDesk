@@ -1,0 +1,13 @@
+[Desktop Entry]
+Type=Application
+Name=HopDesk
+GenericName=Remote Desktop Client
+Comment=Control another computer over VNC, RDP or SPICE
+Exec=hopdesk %u
+Icon=io.hopdesk.HopDesk
+Terminal=false
+Categories=Network;RemoteAccess;Utility;
+Keywords=remote;desktop;vnc;rdp;spice;rdesktop;screen;
+# Handle the standard URI schemes so clicking a vnc:// or rdp:// link works.
+MimeType=x-scheme-handler/vnc;x-scheme-handler/rdp;x-scheme-handler/spice;
+StartupWMClass=HopDesk
