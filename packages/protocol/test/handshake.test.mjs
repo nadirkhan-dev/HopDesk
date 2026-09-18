@@ -245,12 +245,22 @@ test('repeated wrong codes lock out guessing and rotate the code; abandoned hand
 
   for (let i = 0; i < 2; i++) assert.equal((await run(host, wrong)).v.reason.code, 'bad-auth');
 
-  // An attacker that takes the challenge and never answers still spends a guess.
-  const { viewer, host: hostLink } = linkPair((dir, m) => (m.type === 'confirm' ? null : m));
-  const hostSide = host.accept(hostLink, { handshakeTimeoutMs: 100 });
-  connect(viewer, host, { now, handshakeTimeoutMs: 5000 }).catch(() => {});
+  /* An attacker that takes the challenge and never answers still spends a
+     guess. The host's timeout has to outlast the viewer's key derivation —
+     scrypt takes a moment — or the host would time out waiting for the hello
+     instead, which is a different thing and costs the attacker nothing. */
+  let challenged = false;
+  const { viewer, host: hostLink } = linkPair((dir, m) => {
+    if (m.type === 'challenge') challenged = true;
+    // The viewer answers, and the answer never arrives: an abandoned attempt.
+    return m.type === 'confirm' ? null : m;
+  });
+  const hostSide = host.accept(hostLink, { handshakeTimeoutMs: 1500 });
+  const abandoning = connect(viewer, host, { now, handshakeTimeoutMs: 5000 }).catch(() => {});
   await assert.rejects(hostSide, err => err.code === 'timeout');
+  assert.ok(challenged, 'the host timed out before it even answered; the guess was never spent');
   viewer.close();
+  await abandoning;
   assert.equal(host.auth.limiter.failuresSinceRotation, 3);
 
   const locked = await run(host, { now });
@@ -265,4 +275,143 @@ test('repeated wrong codes lock out guessing and rotate the code; abandoned hand
   assert.equal(host.state.code, '000111');
   t += 10 * 60_000;
   assert.equal((await run(host, { now })).v.reason.code, 'bad-auth', 'the old code still worked after rotation');
+});
+
+/* ------------------------------------------------- account-based connections */
+
+test('two computers on the same account connect without a code, and the keys agree', async () => {
+  const viewerKeyBytes = viewerIdentity.publicKey;
+  const authorised = [];
+  const host = makeHost({
+    accountAuthorised: (id, key) => {
+      authorised.push(id);
+      // The Device ID *and* the key must match what the account knows.
+      return id === deviceIdFromPublicKey(viewerKeyBytes) && toBase64(key) === toBase64(viewerKeyBytes);
+    },
+  });
+  const { v, h } = await run(host, { credential: { kind: 'account' } });
+  assert.equal(v.status, 'fulfilled', v.reason?.stack);
+  assert.equal(h.status, 'fulfilled', h.reason?.stack);
+  assert.deepEqual(v.value.root, h.value.root);
+  assert.equal(h.value.viewer.auth, 'account');
+  assert.deepEqual(authorised, [deviceIdFromPublicKey(viewerKeyBytes)]);
+
+  // The sealed channel works on the keys the exchange produced.
+  const got = new Promise(resolve => h.value.control.onMessage(resolve));
+  v.value.control.send({ type: 'ping', t: 7 });
+  assert.deepEqual(await got, { type: 'ping', t: 7 });
+  v.value.control.close();
+});
+
+test('a device the account does not know is refused, whatever it claims', async () => {
+  const host = makeHost({ accountAuthorised: () => false });
+  const r = await run(host, { credential: { kind: 'account' } });
+  assert.equal(r.v.reason.code, 'not-authorised');
+  assert.equal(host.state.prompts.length, 0);
+
+  /* A device whose key does not match the Device ID it claims: the check is
+     given both, so a relay cannot pair one device's name with another's key. */
+  const strict = makeHost({
+    accountAuthorised: (id, key) => id === deviceIdFromPublicKey(key) && id === 'HD-0000-0000',
+  });
+  assert.equal((await run(strict, { credential: { kind: 'account' } })).v.reason.code, 'not-authorised');
+});
+
+test('an account connection cannot be taken over by whoever relays it', async () => {
+  const mallory = generateIdentity();
+  const always = { accountAuthorised: () => true };
+
+  // The relay answers with its own device key: the Device ID no longer matches.
+  let host = makeHost(always);
+  let r = await run(host, { credential: { kind: 'account' } }, {},
+    (dir, m) => (m.type === 'challenge' ? { ...m, hostKey: toBase64(mallory.publicKey) } : m));
+  assert.equal(r.v.reason.code, 'identity-mismatch');
+
+  // It substitutes its own ephemeral key: the host's signature no longer covers it.
+  host = makeHost(always);
+  r = await run(host, { credential: { kind: 'account' } }, {}, (dir, m) => {
+    if (m.type !== 'challenge') return m;
+    const dh = fromBase64(m.dh); dh[0] ^= 1;
+    return { ...m, dh: toBase64(dh) };
+  });
+  assert.equal(r.v.reason.code, 'bad-auth');
+
+  // It alters the name shown to the user: the binding, and so the keys, change.
+  host = makeHost(always);
+  r = await run(host, { credential: { kind: 'account' } }, {}, (dir, m) => (m.type === 'hello' ? { ...m, viewerName: 'Finance PC' } : m));
+  assert.equal(r.v.reason.code, 'bad-auth');
+
+  // It forges the viewer's confirmation: no device key, no valid signature.
+  host = makeHost(always);
+  r = await run(host, { credential: { kind: 'account' } }, {}, (dir, m) => {
+    if (m.type !== 'confirm') return m;
+    const sig = fromBase64(m.signature); sig[5] ^= 1;
+    return { ...m, signature: toBase64(sig) };
+  });
+  assert.equal(r.h.reason.code, 'protocol');
+});
+
+test('an account connection is refused if the protocol fields do not fit the method', async () => {
+  const host = makeHost({ accountAuthorised: () => true });
+  // An account hello with no ephemeral key.
+  const r = await run(host, { credential: { kind: 'account' } }, {}, (dir, m) => {
+    if (m.type !== 'hello') return m;
+    const { dh, ...rest } = m;
+    return rest;
+  });
+  assert.equal(r.v.reason.code, 'protocol');
+
+  // A code hello with no SPAKE2 share.
+  const host2 = makeHost();
+  const r2 = await run(host2, {}, {}, (dir, m) => {
+    if (m.type !== 'hello') return m;
+    const { share, ...rest } = m;
+    return rest;
+  });
+  assert.equal(r2.v.reason.code, 'protocol');
+});
+
+test('each account exchange derives fresh keys, and a replayed hello is refused', async () => {
+  const host = makeHost({ accountAuthorised: () => true });
+  const first = await run(host, { credential: { kind: 'account' } });
+  const second = await run(host, { credential: { kind: 'account' } });
+  assert.equal(second.v.status, 'fulfilled', second.v.reason?.stack);
+  assert.notDeepEqual(first.v.value.root, second.v.value.root, 'two sessions shared a key');
+  first.v.value.control.close();
+  second.v.value.control.close();
+
+  let recorded;
+  const third = await run(host, { credential: { kind: 'account' } }, {}, (dir, m) => { if (m.type === 'hello') recorded = m; return m; });
+  third.v.value.control.close();
+  const { viewer, host: hostLink } = linkPair();
+  const replies = [];
+  viewer.onMessage(m => replies.push(m));
+  const hostSide = host.accept(hostLink);
+  viewer.send(recorded);
+  await assert.rejects(hostSide, err => err.code === 'replay');
+});
+
+test('a computer on the account still has to be allowed, unless unattended access is on', async () => {
+  const host = makeHost({ accountAuthorised: () => true });
+
+  /* The default: an account connection asks the person at the host, exactly as
+     an access code does. Owning both computers is not the same as being at one. */
+  host.state.decision = 'reject';
+  const refused = await run(host, { credential: { kind: 'account' } });
+  assert.equal(refused.v.reason.code, 'rejected');
+  assert.deepEqual(host.state.prompts.map(p => p.auth), ['account']);
+
+  host.state.decision = 'allow';
+  const allowed = await run(host, { credential: { kind: 'account' } });
+  assert.equal(allowed.v.status, 'fulfilled', allowed.v.reason?.stack);
+  allowed.v.value.control.close();
+  assert.equal(host.state.prompts.length, 2);
+
+  /* A host that has opted into unattended access has already answered: those
+     connections go through without anyone present. */
+  const unattended = makeHost({ accountAuthorised: () => true });
+  const silent = await run(unattended, { credential: { kind: 'account' } }, { needsConsent: kind => kind === 'code' });
+  assert.equal(silent.v.status, 'fulfilled', silent.v.reason?.stack);
+  assert.equal(unattended.state.prompts.length, 0, 'unattended access still prompted');
+  silent.v.value.control.close();
 });

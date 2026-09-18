@@ -61,7 +61,7 @@ The clean route to an embedded RDP view is a small native helper that links
 FreeRDP's library and streams frames the way `Session` already does for VNC.
 That is a separate project with its own packaging cost per distribution.
 
-## Native HopDesk protocol — implemented (phase 1), not yet used by the app
+## Native HopDesk protocol — implemented (phase 1)
 
 Three packages, each depending only on the one before it:
 
@@ -148,35 +148,166 @@ host → viewer   sealed auth-result (after consent)
   tested with a scripted adapter only; a real RTCPeerConnection, screen
   capture and input injection arrive with the Linux Host in phase 2.
 
-## Design only: the Host in the app (phase 2)
+## The Host and Viewer in the app — implemented (phase 2), Linux/X11
 
-* One app, two roles. The Host part runs in the Electron main process (keys,
-  handshake, consent, input injection) with capture and WebRTC in a hidden
-  renderer.
-* Capture and encoding: Chromium desktop capture plus WebRTC video (hardware
-  encoders where available). Input: XTest on X11 through `koffi`;
-  Wayland only through the xdg-desktop-portal RemoteDesktop portal, which
-  asks the user. macOS (ScreenCaptureKit/CGEvent, Screen Recording and
-  Accessibility permissions) and Windows (SendInput) follow the same
-  interfaces: `ScreenCapture`, `InputController`, `ClipboardProvider`,
-  `DisplayManager`, `PermissionManager`, `SecureStorage`, `HostService`.
-* LAN discovery: `_hopdesk._tcp` with the Device ID in TXT.
-
-## Design only: accounts and the internet (phases 3–5)
+One application, two roles, and the split is a security boundary: everything
+secret stays in the main process.
 
 ```
-Viewer ── LAN direct (no server) ───────────────────────────▶ Host
-Viewer ── signaling ── WebRTC direct (ICE/STUN) ────────────▶ Host
-Viewer ── signaling ── TURN (coturn, ciphertext only) ──────▶ Host
+┌───────────────────── main process ─────────────────────┐
+│ identity.ts   device key in safeStorage (OS keystore)  │
+│ host.ts       listener, handshake, consent, grants     │
+│ viewer.ts     connect by Device ID, resume on drop     │
+│ rtc-bridge.ts drives a peer connection by remote call  │
+│ devices.ts    pinned host keys, per Device ID          │
+└───────┬──────────────────────────┬────────────────────-┘
+        │ IPC (ipc-guard)          │ IPC
+┌───────▼─────────────┐  ┌─────────▼───────────────────┐
+│ renderer/hopdesk.js │  │ renderer/host-rtc.js        │
+│ viewer: video in,   │  │ hidden window: getDisplay-  │
+│ input and clipboard │  │ Media, sends screen, relays │
+│ out over channels   │  │ input/clipboard to main     │
+└─────────────────────┘  └─────────────────────────────┘
 ```
 
-* Self-hostable server (Docker Compose): account API (scrypt-hashed passwords,
-  short-lived access tokens, rotating refresh tokens stored hashed), device
-  enrollment and removal, presence, WebSocket signaling, time-limited TURN
-  credentials for coturn. LAN use never requires it.
-* The signaling server relays the same handshake and sealed frames as the LAN
-  link. It learns which devices talk and when, never codes, keys, screens,
-  keystrokes or clipboard contents.
+* **Why a renderer at all:** RTCPeerConnection and screen capture exist only in
+  Chromium's renderer. The renderer never sees the device key, the access code
+  or the session keys; the main process decides everything and only asks the
+  renderer to make an offer, answer one, or add a candidate.
+* **Input:** `@hopdesk/platform` injects through XTest (`libXtst` via `koffi`,
+  no compiled addon). Keysyms the layout has no key for — any non-Latin
+  character or emoji — are placed on a borrowed keycode, pressed, and given back
+  shortly after release so the receiving application has processed the mapping
+  change. Every message is validated against the protocol schema in the main
+  process before it reaches the platform.
+* **Capture:** `getDisplayMedia` in the hidden window, answered by
+  `setDisplayMediaRequestHandler` with the primary screen, and only while remote
+  access is on and only for that window. Chromium chooses its capture backend
+  from `XDG_SESSION_TYPE`, not from the window backend, which is why
+  `scripts/launch-args.mjs` sets both together.
+* **Clipboard:** the viewer's clipboard is sent on demand and when the session
+  view takes focus; the host's is polled once a second while a session is
+  connected and sent when it changes. Contents are never logged.
+* **Platform interfaces** for the ports still to come — `ScreenCapture`,
+  `InputController`, `ClipboardProvider`, `DisplayManager`, `PermissionManager`,
+  `HostService` — are in `@hopdesk/platform`. Windows (SendInput, Desktop
+  Duplication) and macOS (CGEvent, ScreenCaptureKit, with the Screen Recording
+  and Accessibility permissions) implement the same shapes; neither is written.
+* **Discovery:** `_hopdesk._tcp` over mDNS, Device ID as the instance name and
+  in TXT, answered from the app itself (no Avahi dependency). It is a hint about
+  where to connect, never authentication.
+
+### Verified vs not (phase 2)
+
+* Verified between two real HopDesk applications on Linux/X11: handshake,
+  consent, live WebRTC video, mouse and keyboard arriving in an application on
+  the host, clipboard onto the host's system clipboard, discovery by Device ID,
+  silent resume after the connection was cut, wrong code refused without a
+  prompt, Reject honoured, remote access off closing the listener.
+* **Verified since:** Wayland *input* on a real GNOME session (see below).
+* **Not verified:** Wayland *capture* (blocked by the Electron crash below),
+  Windows, macOS host, multi-monitor selection, and resizing the host display to
+  the viewer's window.
+
+### Wayland, and the Electron bug in the way
+
+Input on Wayland works, and not through XTest: X11 clients cannot control a
+Wayland desktop at all, which is the point of Wayland. HopDesk uses
+`org.freedesktop.portal.RemoteDesktop`, so the compositor asks the person at the
+keyboard before anything can move their pointer. `NotifyKeyboardKeysym` takes
+keysyms, which is exactly what the protocol already carries, so no key table is
+involved. Absolute pointer positions are expressed in the coordinates of a
+screen the same session shares, which is why the session selects a ScreenCast
+source as well.
+
+**Verified on a real GNOME Wayland session** (2026-09-18): the portal accepted
+the session, shared a 1920x1200 stream, and the pointer, scrolling and typing —
+including Arabic text — all arrived. Seven checks out of seven, run by the
+person at the keyboard, because the permission dialog is theirs to answer.
+
+Two things the portal decides, not HopDesk:
+
+* GNOME refuses `persist_mode` for a session that can control the machine
+  ("Remote desktop sessions cannot persist"), so the dialog appears each time
+  remote access is switched on. HopDesk asks for persistence, accepts the
+  refusal, and carries on.
+* Unattended access is therefore not possible on GNOME Wayland: someone has to
+  allow the session at the keyboard.
+
+**Capture on Wayland is blocked by Electron.** Chromium will only capture a
+Wayland desktop from its own Wayland backend, and creating a window with that
+backend segfaults: reproduced on Electron 38, 42 and 44 on this machine (GNOME
+46, mutter, Intel Iris Xe), while Chrome 152 on the same machine runs on Wayland
+without trouble. An Electron app with no window survives, so the crash is in
+window creation. Until that is fixed upstream, HopDesk on a Wayland desktop runs
+through Xwayland: the mouse and keyboard reach the real desktop through the
+portal, but the picture shows X11 windows only — and the interface says so
+rather than sharing an almost-empty screen silently.
+
+## Accounts, the server and the relay — implemented (phases 3–5)
+
+```
+Viewer ── LAN direct, no server ────────────────────────────▶ Host
+Viewer ── server introduces ── WebRTC direct (ICE/STUN) ────▶ Host
+Viewer ── server introduces ── TURN relay (coturn) ─────────▶ Host
+```
+
+The server (`server/`) is self-hosted and optional: a local network needs
+nothing but the two applications.
+
+### What the server is
+
+* **Accounts** — scrypt-hashed passwords, and a sign-in answered identically
+  whether or not the email exists. Sign-in attempts are throttled per email, in
+  the database, so a restart does not reset the limit.
+* **Two kinds of credential.** Short-lived signed access tokens for a person who
+  is signed in; long-lived **device tokens** for a computer that has to
+  reconnect on its own. A device token can carry sessions, list the account's
+  computers and ask for relay credentials, but cannot enrol another computer or
+  remove one — so a stolen one cannot lock the owner out.
+* **Refresh tokens rotate.** Each use issues a new one and marks the old spent;
+  a second use of a spent token means it was copied, so the whole family is
+  revoked and the person signs in again.
+* **Device enrolment proves possession.** The server issues a nonce, the device
+  signs it with its Ed25519 key, and the server checks both the signature and
+  that the Device ID is the one that key produces.
+* **Storage** is SQLite through Node's own `node:sqlite` — no database service,
+  no native module.
+
+### What the server cannot do
+
+It relays frames it never looks inside. The account connection uses an
+**ephemeral X25519 exchange signed by both device keys** (`crypto/exchange.ts`),
+so the shared key exists only on the two computers; substituting a key, a name
+or an ephemeral share breaks the signatures or the confirmation. A relay is
+therefore not a party to the session, only a pipe. What it does learn: which
+devices are online, and which asked to reach which, when.
+
+The limit worth stating plainly: **the account list is the server's to define.**
+A compromised server could add a device of its own to an account — it still
+could not read existing sessions, and the host still asks the person present to
+allow the connection unless unattended access was switched on.
+
+### The relay
+
+coturn with `use-auth-secret`: the server hands out a username that is an expiry
+time and an HMAC of it under a secret only the server and coturn share. Clients
+never see the secret and their credentials expire on their own. *Always connect
+through the relay* forces that path for people who would rather not expose
+addresses at all.
+
+### Verified vs not (phases 3–5)
+
+* Verified: the server's own suite (accounts, throttling, token rotation and
+  replay detection, enrolment proofs, device-token limits, relay authorisation
+  and refusals, a full handshake through the relay with only ciphertext on the
+  wire); the Docker image built and the container serving real requests; TURN
+  credentials accepted by a real coturn and a wrong one refused; two HopDesk
+  applications signing in to a server here, listing each other and connecting
+  through it; and a session **forced through coturn**, where ICE reported a
+  relay path, video arrived, and coturn logged the traffic it carried.
+* **Not verified:** a deployment on a real domain (certificates, ports opened on
+  a VPS) and NAT traversal between two genuinely different networks.
 
 ## Discovery
 

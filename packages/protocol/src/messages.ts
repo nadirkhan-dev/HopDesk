@@ -22,7 +22,16 @@ const mac = b64({ bytes: 32 });
 const signature = b64({ bytes: 64 });
 const grantId = b64({ bytes: 16 });
 
-export const AUTH_KINDS = ['code', 'grant', 'unattended'] as const;
+/**
+ * How a viewer is authorised.
+ *
+ * `code` and `unattended` are secrets someone typed, run through SPAKE2.
+ * `grant` resumes an already-approved session. `account` is for two computers
+ * on the same HopDesk account: there is no secret to type, so it uses a signed
+ * ephemeral exchange instead, authorised by the account and authenticated by
+ * the device keys.
+ */
+export const AUTH_KINDS = ['code', 'grant', 'unattended', 'account'] as const;
 export type AuthKind = typeof AUTH_KINDS[number];
 
 export const helloMessage = obj({
@@ -37,7 +46,11 @@ export const helloMessage = obj({
   time: int(0, Number.MAX_SAFE_INTEGER),
   auth: oneOf(AUTH_KINDS),
   grantId: optional(grantId),
-  share,
+  /** SPAKE2 share, for the kinds that use a typed secret. */
+  share: optional(share),
+  /** Ephemeral X25519 public key, for `account`. */
+  dh: optional(b64({ bytes: 32 })),
+  signature: optional(signature),
 });
 
 export const challengeMessage = obj({
@@ -45,7 +58,8 @@ export const challengeMessage = obj({
   hostKey: publicKey,
   hostName: str({ max: 64 }),
   nonce,
-  share,
+  share: optional(share),
+  dh: optional(b64({ bytes: 32 })),
   confirm: mac,
   signature,
 });
@@ -58,7 +72,7 @@ export const confirmMessage = obj({
 
 export const HANDSHAKE_ERRORS = [
   'unsupported-version', 'unknown-device', 'rate-limited', 'bad-auth', 'grant-invalid',
-  'unattended-disabled', 'code-disabled', 'replay', 'clock-skew', 'busy', 'protocol',
+  'unattended-disabled', 'code-disabled', 'not-authorised', 'replay', 'clock-skew', 'busy', 'protocol',
 ] as const;
 export type HandshakeErrorCode = typeof HANDSHAKE_ERRORS[number];
 

@@ -5,16 +5,17 @@
   "description": "A fast, friendly remote desktop client for Linux",
   "workspaces": [
     "packages/*",
-    "apps/*"
+    "apps/*",
+    "server"
   ],
   "scripts": {
-    "build": "npm -w @hopdesk/crypto run build && npm -w @hopdesk/protocol run build && npm -w @hopdesk/transport run build && npm -w @hopdesk/core run build && npm -w @hopdesk/desktop run build",
+    "build": "npm -w @hopdesk/crypto run build && npm -w @hopdesk/protocol run build && npm -w @hopdesk/transport run build && npm -w @hopdesk/platform run build && npm -w @hopdesk/core run build && npm -w @hopdesk/desktop run build && npm -w @hopdesk/server run build",
     "test": "npm run test:packages && npm run test:desktop",
-    "typecheck": "tsc --noEmit -p packages/crypto && tsc --noEmit -p packages/protocol && tsc --noEmit -p packages/transport && tsc --noEmit -p packages/core && tsc --noEmit -p apps/desktop",
-    "lint": "eslint \"packages/*/src/**/*.ts\" \"apps/desktop/src/**/*.ts\"",
-    "start": "npm run build && env -u ELECTRON_RUN_AS_NODE electron apps/desktop/dist/main.js",
-    "test:packages": "npm -w @hopdesk/crypto run test && npm -w @hopdesk/protocol run test && npm -w @hopdesk/transport run test && npm -w @hopdesk/core run test",
-    "test:desktop": "node --test --test-concurrency=1 apps/desktop/test/*.test.mjs"
+    "typecheck": "tsc --noEmit -p packages/crypto && tsc --noEmit -p packages/protocol && tsc --noEmit -p packages/transport && tsc --noEmit -p packages/platform && tsc --noEmit -p packages/core && tsc --noEmit -p apps/desktop && tsc --noEmit -p server",
+    "lint": "eslint \"packages/*/src/**/*.ts\" \"apps/desktop/src/**/*.ts\" \"server/src/**/*.ts\"",
+    "start": "npm run build && node apps/desktop/scripts/run-dev.mjs",
+    "test:packages": "npm -w @hopdesk/crypto run test && npm -w @hopdesk/protocol run test && npm -w @hopdesk/transport run test && npm -w @hopdesk/platform run test && npm -w @hopdesk/core run test && npm -w @hopdesk/server run test",
+    "test:desktop": "node --test --test-concurrency=1 --test-timeout=240000 apps/desktop/test/*.test.mjs"
   },
   "devDependencies": {
     "@typescript-eslint/eslint-plugin": "^6.21.0",

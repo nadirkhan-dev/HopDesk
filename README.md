@@ -2,14 +2,26 @@
 
 Control your Windows PC, Mac or Linux computer from Linux.
 
-Add a computer once, double-click it, and its screen is in front of you — with
-the keyboard, mouse, clipboard and full screen working the way you expect, and
-your passwords kept encrypted.
+Two ways to connect:
+
+* **HopDesk to HopDesk** — no addresses, no ports, no server software to set
+  up. The other computer shows a Device ID and an access code; you type them in
+  and someone there clicks Allow. On the same network this needs nothing else;
+  across the internet it needs [your own HopDesk server](#run-your-own-hopdesk-server).
+  Linux only so far (see [Connect two HopDesk computers](#connect-two-hopdesk-computers)).
+* **Standard protocols** — Remote Desktop (Windows) and Screen Sharing/VNC
+  (Mac, Linux) for computers that already have them switched on. Add a computer
+  once, double-click it, and its screen is in front of you.
+
+Either way the keyboard, mouse, clipboard and full screen work the way you
+expect, and your passwords stay encrypted.
 
 *Not affiliated with any commercial remote desktop product. Independent code,
 open protocols only.*
 
 - [Install](#install)
+- [Connect two HopDesk computers](#connect-two-hopdesk-computers)
+- [Run your own HopDesk server](#run-your-own-hopdesk-server)
 - [Connect to Windows](#connect-to-windows)
 - [Connect to a Mac](#connect-to-a-mac)
 - [Connect to Linux](#connect-to-linux)
@@ -61,6 +73,108 @@ sudo apt install freerdp2-x11     # Ubuntu 22.04, Debian 12, Mint 21
 sudo dnf install freerdp          # Fedora
 sudo pacman -S freerdp            # Arch
 ```
+
+## Connect two HopDesk computers
+
+This needs nothing installed on either computer except HopDesk, and no network
+configuration: no port forwarding, no VNC or RDP server, no account.
+
+**On the computer you want to reach**, under *This computer* in the sidebar,
+click **Turn on**. It then shows:
+
+```
+● Online
+Device ID     HD-7K3M-Q9TX     [Copy]
+Access code   739 421          [Copy] [New code]
+```
+
+**On the computer you are sitting at**, type that Device ID and access code
+under *Connect*, and click **Connect**.
+
+**Back on the first computer**, a prompt names the computer asking to connect
+and waits for **Allow** or **Reject**. Nothing is shared until someone clicks
+Allow — that is the default and cannot be switched off by the computer
+connecting.
+
+Then the screen appears, with the mouse, keyboard and clipboard working. *Send
+clipboard* copies this computer's clipboard to the other one; text copied there
+arrives here by itself. Ctrl+Alt+Enter toggles full screen. **Disconnect** ends
+the session, and so does closing HopDesk.
+
+A few details worth knowing:
+
+* **The access code is temporary.** It is new each time HopDesk starts, *New
+  code* replaces it, and it is replaced automatically after repeated wrong
+  guesses. It is never sent over the network — both computers prove they know it
+  without either revealing it (SPAKE2, RFC 9382), so it cannot be captured or
+  guessed offline.
+* **The Device ID is not a password.** It identifies the computer; the access
+  code authorises the connection. HopDesk also remembers the identity key behind
+  each Device ID and warns if it ever changes.
+* **Finding the other computer.** On the same network its Device ID is enough.
+  If discovery is blocked, open *More options* under Connect and type its
+  address.
+* **If the connection drops**, it comes back by itself without asking anyone
+  again. If the person at the other computer disconnects, it does not.
+* **Unattended access** (Settings → *Letting others connect to this computer*)
+  lets a computer be reached with a password and nobody there to allow it. It is
+  off, needs its own password of at least eight characters, and asks for
+  confirmation before it is switched on. The password is never stored: what is
+  kept cannot be used as the password anywhere else.
+
+## Run your own HopDesk server
+
+A HopDesk server does two things: it lists your computers so you can connect to
+them by name from anywhere, and it passes a connection along when two computers
+cannot reach each other directly. It is not a cloud service someone else runs —
+you run it, on a VPS or any machine with a domain name pointing at it.
+
+**What it can and cannot see.** It knows which of your computers are online and
+which one asked to reach which, and when. It cannot see your screen, your
+keystrokes or your clipboard: the two computers agree on their keys directly,
+and everything the server carries is already encrypted. That is not a promise
+about good behaviour — the server has no key material to decrypt anything with.
+
+### Setting it up
+
+```bash
+git clone <this repository> hopdesk && cd hopdesk/server/docker
+cp .env.example .env
+# Fill in: your domain, an email for the certificate, and three secrets:
+#   openssl rand -base64 48   → HOPDESK_TOKEN_SECRET       (signs sessions)
+#   openssl rand -base64 32   → HOPDESK_TURN_SECRET        (shared with coturn)
+#   openssl rand -base64 24   → HOPDESK_REGISTRATION_TOKEN (who may sign up)
+# and HOPDESK_PUBLIC_IP, this machine's public address.
+docker compose up -d
+```
+
+That starts three containers: the HopDesk server, Caddy (which obtains and
+renews a TLS certificate for your domain by itself), and coturn (the relay).
+Open ports 80 and 443 for the server, and 3478 plus UDP 49160–49200 for the
+relay.
+
+**Creating accounts needs the registration token** you put in `.env`. Anyone you
+give it to can make an account; anyone who merely finds your server cannot,
+including in the window between starting it and signing up yourself. Guessing it
+is throttled per address. If you would rather let anyone sign up, set
+`HOPDESK_REGISTRATION_OPEN=true` instead.
+
+### Using it
+
+In HopDesk, under *Connect*, choose **Sign in to a HopDesk server**, enter your
+server address, tick *Create a new account* the first time, and paste the
+registration token when it asks. Do the same on
+your other computers. Each one then appears under **My computers**, and one
+click connects — the person at the other end is still asked to allow it, unless
+that computer has unattended access switched on.
+
+Signing out on a computer removes it from the account, so it can no longer be
+reached through the server.
+
+Settings has *Always connect through the server's relay*: slower, and it uses
+your server's bandwidth, but the two computers never learn each other's
+addresses. Otherwise HopDesk connects directly when it can and falls back to the
+relay when it cannot; the session bar says which is happening.
 
 ## Connect to Windows
 
@@ -165,11 +279,14 @@ Diagnostics*).
 
 ## What HopDesk cannot do yet
 
-* **Reach computers across the internet by itself.** HopDesk connects directly
-  to an address: the same network, a VPN (for example Tailscale or WireGuard),
-  or a forwarded port. There is no relay service. A design for a HopDesk Host
-  and relay is in [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md); none of it is
-  implemented.
+* **Reach computers across the internet without a server of your own.** There is
+  no HopDesk service to sign up to; you run the server (above), or use a VPN
+  such as Tailscale or WireGuard, or connect on the same network. Standard
+  Remote Desktop and VNC connect to an address as before.
+* **Be a HopDesk host on Windows or macOS.** The Host — sharing *this*
+  computer's screen — is implemented for Linux on X11. Wayland needs the
+  desktop portal, and Windows and macOS need their own capture and input code;
+  neither is written yet.
 * **Show Remote Desktop inside the HopDesk window.** It opens in FreeRDP's own
   window, which HopDesk titles, sizes and closes. The reasons are in
   [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
@@ -187,6 +304,9 @@ Diagnostics*).
 * The AppImage runs with Chromium's sandbox disabled (`--no-sandbox`), as
   AppImages built with electron-builder do, because an AppImage cannot ship the
   setuid sandbox helper. The .deb and Flatpak keep it.
+* **macOS packaging is written but unbuilt.** `packaging/build-macos.sh` builds
+  signed, notarised .dmg files, and needs a Mac, a Developer ID certificate and
+  notarisation credentials. Nobody has run it yet.
 
 ### What has been tested, and what has not
 
@@ -201,9 +321,46 @@ normal (non-root) user, and from inside it connected to TigerVNC and — through
 its bundled FreeRDP 3.31.1 — to xrdp, with the certificate dialog, sign-in and
 disconnect.
 
-**Not tested: a real Windows PC, and a real Mac.** The steps above follow how
-those systems work, but no session with either has been established during
-development.
+HopDesk-to-HopDesk was tested between two real HopDesk applications on Linux
+(X11): turning remote access on, connecting by Device ID and access code, the
+Allow prompt, a live WebRTC session showing the other computer's screen, mouse
+movement and keystrokes arriving in an application there, the clipboard
+arriving on its system clipboard, finding the computer by Device ID alone over
+mDNS, resuming by itself after the network was cut, a wrong access code being
+refused without prompting anyone, Reject being honoured, and turning remote
+access off closing the door.
+
+The server was tested as it ships: the image built, the container ran, accounts
+and sign-in worked against it, and its own suite covers registration, sign-in
+throttling, rotating refresh tokens (including detecting a replayed one), device
+enrolment with proof of key, what a device token may and may not do, and the
+relay refusing everything it should. Two HopDesk applications signed in to a
+server running here, found each other under *My computers*, and connected
+through it — with the relay forced on, the media went through a real coturn
+container, which logged the traffic it carried. The bundled TURN credentials
+were checked against coturn directly: ours are accepted, a wrong one is not.
+
+The AppImage and the .deb were built and **started**, and two packaged copies
+connected to each other — screen, consent and mouse control included. That test
+is what caught three bundling mistakes that looked fine in development: a
+missing D-Bus library, koffi's JavaScript, and koffi's native binary, which
+cannot be loaded from inside an asar archive. The Flatpak's dependency list was
+regenerated for the new packages with flatpak-node-generator, but **the Flatpak
+itself was not rebuilt** (flatpak-builder is not installed here).
+
+On a Wayland desktop, **controlling** the computer was tested on a real GNOME
+session: the desktop's own permission dialog, then the pointer, scrolling and
+typing — including Arabic — arriving in the focused window. **Seeing** that
+desktop is another matter: Electron cannot capture it without its Wayland
+backend, which crashes (see [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)), so a
+Wayland computer can be controlled but shows only its X11 windows. HopDesk says
+so in the interface rather than quietly sharing an almost-empty screen.
+
+**Not tested: a real deployment on a domain across the internet** (the
+certificate step, and NAT traversal between two different networks), **a real
+Windows PC, and a real Mac** — as a computer to connect to, or as a HopDesk
+host. The steps above follow how those systems work, but no session with either
+has been established during development.
 
 ## For developers
 

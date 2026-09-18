@@ -49,4 +49,68 @@ contextBridge.exposeInMainWorld('hopdesk', {
   onNotice: handler => {
     ipcRenderer.on('notice', (_event, payload) => handler(payload));
   },
+
+  /* ---------------------------------------------- this computer as a host */
+
+  hostStatus: () => ipcRenderer.invoke('hostStatus'),
+  setRemoteAccess: patch => ipcRenderer.invoke('setRemoteAccess', patch),
+  regenerateAccessCode: () => ipcRenderer.invoke('regenerateAccessCode'),
+  checkPermissions: () => ipcRenderer.invoke('checkPermissions'),
+  requestPermissions: () => ipcRenderer.invoke('requestPermissions'),
+  openPermissionSettings: action => ipcRenderer.invoke('openPermissionSettings', action),
+  endHostSession: (id, reason) => ipcRenderer.invoke('endHostSession', id, reason),
+  knownDevices: () => ipcRenderer.invoke('knownDevices'),
+  forgetDevice: deviceId => ipcRenderer.invoke('forgetDevice', deviceId),
+  answerConsent: (id, decision) => ipcRenderer.invoke('answerConsent', id, decision),
+  onHostStatus: handler => {
+    ipcRenderer.on('hostStatus', (_event, payload) => handler(payload));
+  },
+  onConsentRequest: handler => {
+    ipcRenderer.on('consentRequest', (_event, payload) => handler(payload));
+  },
+  onConsentWithdrawn: handler => {
+    ipcRenderer.on('consentWithdrawn', (_event, payload) => handler(payload));
+  },
+
+  /* ------------------------------------- connecting to another computer */
+
+  connectDevice: request => ipcRenderer.invoke('connectDevice', request),
+  disconnectDevice: () => ipcRenderer.invoke('disconnectDevice'),
+  sendToHost: (label, message) => ipcRenderer.send('viewerSend', { label, message }),
+  viewerClipboardRead: () => ipcRenderer.invoke('viewerClipboardRead'),
+  viewerClipboardWrite: text => ipcRenderer.invoke('viewerClipboardWrite', text),
+  onDeviceSession: handler => {
+    ipcRenderer.on('deviceSession', (_event, payload) => handler(payload));
+  },
+
+  /* ------------------------------------------------------ HopDesk account */
+
+  accountState: () => ipcRenderer.invoke('accountState'),
+  accountSignIn: request => ipcRenderer.invoke('accountSignIn', request),
+  accountSignOut: () => ipcRenderer.invoke('accountSignOut'),
+  accountRefresh: () => ipcRenderer.invoke('accountRefresh'),
+  accountRemoveComputer: deviceId => ipcRenderer.invoke('accountRemoveComputer', deviceId),
+  connectComputer: deviceId => ipcRenderer.invoke('connectComputer', deviceId),
+  onAccountState: handler => {
+    ipcRenderer.on('accountState', (_event, payload) => handler(payload));
+  },
+
+  /* ------------------------------------------ the WebRTC half of a session */
+
+  onRtcCall: handler => {
+    ipcRenderer.on('rtc:call', (_event, payload) => handler(payload));
+  },
+  rtcReply: reply => ipcRenderer.send('rtc:reply', reply),
+  rtcEvent: event => ipcRenderer.send('rtc:event', event),
+
+  /* ------------------------------- used only by the hidden capture window */
+
+  hostReady: () => ipcRenderer.send('host:ready'),
+  hostInput: (sessionId, message) => ipcRenderer.send('host:input', { sessionId, message }),
+  hostClipboard: (sessionId, message) => ipcRenderer.send('host:clipboard', { sessionId, message }),
+  hostDisplay: (sessionId, message) => ipcRenderer.send('host:display', { sessionId, message }),
+  hostLog: text => ipcRenderer.send('host:log', text),
+  onHostSend: handler => {
+    ipcRenderer.on('host:send', (_event, payload) => handler(payload));
+  },
 });

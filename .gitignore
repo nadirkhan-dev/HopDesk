@@ -1,11 +1,11 @@
-cat > .gitignore <<'EOF'
 node_modules/
 dist/
+dist-packages/
 build/
+.flatpak-builder/
 .env
 .env.*
 !.env.example
 coverage/
 .DS_Store
 *.log
-EOF

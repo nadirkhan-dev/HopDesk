@@ -1,7 +1,8 @@
 import {
   Spake2, passwordScalar, secretScalar, deriveSessionRoot, deviceIdFromPublicKey, sign, verify,
-  sha256, encodeFields, concat, utf8, toBase64, fromBase64, bigIntToBytes, bytesToBigInt,
-  type DeviceIdentity, type Spake2Result,
+  sha256, encodeFields, concat, equalBytes, utf8, toBase64, fromBase64, bigIntToBytes, bytesToBigInt,
+  generateEphemeral, deriveExchange, ExchangeError,
+  type DeviceIdentity, type EphemeralKeyPair, type Spake2Result,
 } from '@hopdesk/crypto';
 import { randomBytes } from 'node:crypto';
 import {
@@ -41,16 +42,26 @@ export class HandshakeError extends Error {
 const HOST_SIG = 'hopdesk/handshake/host/v1';
 const VIEWER_SIG = 'hopdesk/handshake/viewer/v1';
 
-function binding(hello: HelloMessage, hostKey: string, hostName: string, hostNonce: string): Uint8Array {
+function binding(hello: HelloMessage, hostKey: string, hostName: string, hostNonce: string, hostDh = ''): Uint8Array {
   return sha256(encodeFields(
     'hopdesk/handshake/binding/v1', String(hello.v), hello.hostId, hello.viewerId,
     fromBase64(hello.viewerKey), fromBase64(hostKey), hello.viewerName, hostName,
     fromBase64(hello.nonce), fromBase64(hostNonce), String(hello.time), hello.auth, hello.grantId ?? '',
+    // Empty for the SPAKE2 kinds; the ephemeral keys for an account exchange.
+    hello.dh ? fromBase64(hello.dh) : new Uint8Array(), hostDh ? fromBase64(hostDh) : new Uint8Array(),
   ));
 }
 
 function sessionRoot(result: Spake2Result, bind: Uint8Array, pA: Uint8Array, pB: Uint8Array, cA: Uint8Array, cB: Uint8Array) {
   return deriveSessionRoot(result.Ke, sha256(encodeFields(bind, pA, pB, cA, cB)));
+}
+
+/**
+ * What each side signs. The message is public — it contains no key material —
+ * and the label keeps a host signature from ever passing as a viewer's.
+ */
+function signedBody(bind: Uint8Array, a: Uint8Array, b: Uint8Array, mac: Uint8Array) {
+  return concat(bind, a, b, mac);
 }
 
 /** The scalar a host stores for unattended access: never the password itself. */
@@ -79,6 +90,12 @@ export interface HostAuthOptions {
   grants: GrantStore;
   /** Stored verifier when unattended access is enabled; null otherwise. */
   unattended?: () => Uint8Array | null;
+  /**
+   * Whether a device may connect because it is on the same HopDesk account.
+   * Given the Device ID *and* the key it presented, so a relay cannot pass off
+   * one device's identifier with another's key.
+   */
+  accountAuthorised?: (viewerId: string, viewerKey: Uint8Array) => boolean;
   now?: () => number;
   limiter?: AttemptLimiter;
   unattendedLimiter?: AttemptLimiter;
@@ -123,6 +140,16 @@ export class HostAuthenticator {
     const fresh = this.nonces.check(hello.nonce, hello.time);
     if (fresh !== 'ok') return error(fresh);
 
+    /* Two computers on the same account: no secret to type, so an ephemeral
+       exchange signed by both device keys. What authorises it is the account —
+       checked here, against the devices this computer knows are its own. */
+    if (hello.auth === 'account') {
+      if (!hello.dh) return error('protocol');
+      if (!this.opts.accountAuthorised?.(hello.viewerId, viewerKey)) return error('not-authorised');
+      return this.accountChallenge(hello, viewerKey);
+    }
+
+    if (!hello.share) return error('protocol');
     let w: bigint;
     let attempt: Attempt | null = null;
     if (hello.auth === 'grant') {
@@ -146,7 +173,7 @@ export class HostAuthenticator {
     const hostNonce = toBase64(randomBytes(32));
     const hostKey = toBase64(this.opts.identity.publicKey);
     const bind = binding(hello, hostKey, this.opts.hostName, hostNonce);
-    const pA = fromBase64(hello.share);
+    const pA = fromBase64(hello.share);   // present: checked above
     const spake = new Spake2({ role: 'B', idA: utf8(hello.viewerId), idB: utf8(this.deviceId), w });
     let result: Spake2Result;
     try {
@@ -200,6 +227,61 @@ export class HostAuthenticator {
     };
     return { kind: 'challenge', reply, pending };
   }
+
+  /** The account-authorised half of `onHello`: signed ephemeral X25519. */
+  private accountChallenge(hello: HelloMessage, viewerKey: Uint8Array): HelloOutcome {
+    const ephemeral = generateEphemeral();
+    const hostNonce = toBase64(randomBytes(32));
+    const hostKey = toBase64(this.opts.identity.publicKey);
+    const hostDh = toBase64(ephemeral.publicKey);
+    const bind = binding(hello, hostKey, this.opts.hostName, hostNonce, hostDh);
+    const viewerDh = fromBase64(hello.dh!);
+
+    let derived;
+    try {
+      derived = deriveExchange(ephemeral, viewerDh, bind);
+    } catch (err) {
+      if (err instanceof ExchangeError) return { kind: 'error', reply: { type: 'error', code: 'protocol' } };
+      throw err;
+    }
+
+    const reply: ChallengeMessage = {
+      type: 'challenge',
+      hostKey,
+      hostName: this.opts.hostName,
+      nonce: hostNonce,
+      dh: hostDh,
+      confirm: toBase64(derived.hostConfirm),
+      signature: toBase64(sign(this.opts.identity, HOST_SIG, signedBody(bind, viewerDh, ephemeral.publicKey, derived.hostConfirm))),
+    };
+
+    let done = false;
+    const pending: PendingHostHandshake = {
+      confirm: message => {
+        if (done) throw new HandshakeError('protocol', 'Handshake already completed');
+        done = true;
+        const confirm = fromBase64(message.confirm);
+        if (!equalBytes(confirm, derived.viewerConfirm)) {
+          throw new HandshakeError('bad-auth', 'The viewer did not confirm the exchange');
+        }
+        if (!verify(viewerKey, VIEWER_SIG, signedBody(bind, viewerDh, ephemeral.publicKey, confirm), fromBase64(message.signature))) {
+          // Without the device's private key this cannot be produced, which is
+          // what stops a relay from impersonating one of the two computers.
+          throw new HandshakeError('protocol', 'The viewer signature is not valid');
+        }
+        return {
+          viewerId: hello.viewerId,
+          viewerKey,
+          viewerName: hello.viewerName,
+          auth: hello.auth,
+          root: deriveSessionRoot(derived.Ke, sha256(encodeFields(bind, viewerDh, ephemeral.publicKey, confirm, derived.hostConfirm))),
+        };
+      },
+      // Nothing is guessable here, so an abandoned exchange costs nothing.
+      abandon: () => { done = true; },
+    };
+    return { kind: 'challenge', reply, pending };
+  }
 }
 
 /* ---------------------------------------------------------------- viewer */
@@ -207,7 +289,9 @@ export class HostAuthenticator {
 export type ViewerCredential =
   | { kind: 'code'; code: string }
   | { kind: 'grant'; id: string; secret: Uint8Array }
-  | { kind: 'unattended'; password: string };
+  | { kind: 'unattended'; password: string }
+  /** Both computers are on the same HopDesk account; no secret is typed. */
+  | { kind: 'account' };
 
 export interface ViewerHandshakeOptions {
   identity: DeviceIdentity;
@@ -231,17 +315,15 @@ export class ViewerHandshake {
 
   private constructor(
     private readonly opts: ViewerHandshakeOptions,
-    private readonly spake: Spake2,
+    /** One of the two is set, according to the credential. */
+    private readonly spake: Spake2 | null,
+    private readonly ephemeral: EphemeralKeyPair | null,
     readonly hello: HelloMessage,
   ) {}
 
   static async create(opts: ViewerHandshakeOptions): Promise<ViewerHandshake> {
     const viewerId = deviceIdFromPublicKey(opts.identity.publicKey);
     const { credential } = opts;
-    const w = credential.kind === 'grant'
-      ? secretScalar(credential.secret, `${opts.hostId}\0${credential.id}`)
-      : await passwordScalar(credential.kind === 'code' ? credential.code : credential.password, opts.hostId);
-    const spake = new Spake2({ role: 'A', idA: utf8(viewerId), idB: utf8(opts.hostId), w });
     const hello: HelloMessage = {
       type: 'hello',
       v: PROTOCOL_VERSION,
@@ -252,10 +334,21 @@ export class ViewerHandshake {
       nonce: toBase64(randomBytes(32)),
       time: (opts.now ?? Date.now)(),
       auth: credential.kind,
-      share: toBase64(spake.outbound),
     };
+
+    if (credential.kind === 'account') {
+      const ephemeral = generateEphemeral();
+      hello.dh = toBase64(ephemeral.publicKey);
+      return new ViewerHandshake(opts, null, ephemeral, hello);
+    }
+
+    const w = credential.kind === 'grant'
+      ? secretScalar(credential.secret, `${opts.hostId}\0${credential.id}`)
+      : await passwordScalar(credential.kind === 'code' ? credential.code : credential.password, opts.hostId);
+    const spake = new Spake2({ role: 'A', idA: utf8(viewerId), idB: utf8(opts.hostId), w });
+    hello.share = toBase64(spake.outbound);
     if (credential.kind === 'grant') hello.grantId = credential.id;
-    return new ViewerHandshake(opts, spake, hello);
+    return new ViewerHandshake(opts, spake, null, hello);
   }
 
   onChallenge(challenge: ChallengeMessage): { confirm: ConfirmMessage; host: AuthenticatedHost } {
@@ -270,12 +363,15 @@ export class ViewerHandshake {
       throw new HandshakeError('identity-mismatch', 'This device\'s identity key changed since the last connection');
     }
 
+    if (this.ephemeral) return this.finishAccount(challenge, hostKey);
+
+    if (!challenge.share) throw new HandshakeError('protocol', 'The host sent no key share');
     const bind = binding(this.hello, challenge.hostKey, challenge.hostName, challenge.nonce);
-    const pA = this.spake.outbound;
+    const pA = this.spake!.outbound;
     const pB = fromBase64(challenge.share);
     let result: Spake2Result;
     try {
-      result = this.spake.finish(pB, bind);
+      result = this.spake!.finish(pB, bind);
     } catch {
       throw new HandshakeError('protocol', 'The host sent an invalid key share');
     }
@@ -299,6 +395,40 @@ export class ViewerHandshake {
         hostKey,
         hostName: challenge.hostName,
         root: sessionRoot(result, bind, pA, pB, cA, cB),
+      },
+    };
+  }
+
+  /** The account exchange: verify the host's signature, then confirm our own. */
+  private finishAccount(challenge: ChallengeMessage, hostKey: Uint8Array) {
+    if (!challenge.dh) throw new HandshakeError('protocol', 'The host sent no ephemeral key');
+    const ephemeral = this.ephemeral!;
+    const bind = binding(this.hello, challenge.hostKey, challenge.hostName, challenge.nonce, challenge.dh);
+    const hostDh = fromBase64(challenge.dh);
+
+    let derived;
+    try {
+      derived = deriveExchange(ephemeral, hostDh, bind);
+    } catch (err) {
+      throw new HandshakeError('protocol', err instanceof ExchangeError ? err.message : 'The exchange failed');
+    }
+    if (!equalBytes(fromBase64(challenge.confirm), derived.hostConfirm)) {
+      throw new HandshakeError('bad-auth', 'The other computer did not confirm the exchange');
+    }
+    if (!verify(hostKey, HOST_SIG, signedBody(bind, ephemeral.publicKey, hostDh, derived.hostConfirm), fromBase64(challenge.signature))) {
+      throw new HandshakeError('identity-mismatch', 'The host signature is not valid');
+    }
+    return {
+      confirm: {
+        type: 'confirm' as const,
+        confirm: toBase64(derived.viewerConfirm),
+        signature: toBase64(sign(this.opts.identity, VIEWER_SIG, signedBody(bind, ephemeral.publicKey, hostDh, derived.viewerConfirm))),
+      },
+      host: {
+        hostId: this.opts.hostId,
+        hostKey,
+        hostName: challenge.hostName,
+        root: deriveSessionRoot(derived.Ke, sha256(encodeFields(bind, ephemeral.publicKey, hostDh, derived.viewerConfirm, derived.hostConfirm))),
       },
     };
   }

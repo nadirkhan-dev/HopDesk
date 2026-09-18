@@ -11,6 +11,7 @@ import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { createRequire } from 'node:module';
+import { launchEnvironment, ozoneArgs } from '../../scripts/launch-args.mjs';
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 export const desktopDir = path.resolve(here, '../..');
@@ -31,12 +32,14 @@ export async function launchApp({ env = {}, dataDir } = {}) {
   const electronBinary = createRequire(import.meta.url)('electron');
   const xdg = dataDir ?? await mkdtemp(path.join(tmpdir(), 'hopdesk-e2e-'));
 
-  const childEnv = { ...process.env, XDG_DATA_HOME: xdg, ...env };
+  // The same environment a launcher sets, so the app starts as it does for a user.
+  const childEnv = launchEnvironment({ ...process.env, XDG_DATA_HOME: xdg, ...env });
   // Set by VS Code's integrated terminal; it turns Electron into plain Node.
   delete childEnv.ELECTRON_RUN_AS_NODE;
 
   const child = spawn(electronBinary,
-    [path.join(desktopDir, 'dist/main.js'), '--remote-debugging-port=0'],
+    // ozoneArgs is what the real launchers pass; see scripts/launch-args.mjs.
+    [path.join(desktopDir, 'dist/main.js'), ...ozoneArgs(childEnv), '--remote-debugging-port=0'],
     { env: childEnv, stdio: ['ignore', 'pipe', 'pipe'] });
 
   let output = '';

@@ -10,6 +10,7 @@
 import {
   KeyTracker, keysymsForText, framebufferPoint, buttonMask, wheelMask, SPECIAL_COMBOS,
 } from '../dist/keymap.js';
+import { initHopdesk } from './hopdesk.js';
 
 /* The mock exists only so the UI can be opened in an ordinary browser during
    development. Inside Electron a missing bridge is a broken install, and
@@ -994,6 +995,9 @@ async function openSettings() {
     ${toggle('enableAudio', 'Play remote sound (Remote Desktop)', s.defaults.enableAudio)}
     ${toggle('autoReconnect', 'Reconnect automatically if the network drops', s.defaults.autoReconnect)}
 
+    <h2>Letting others connect to this computer</h2>
+    <div id="s-remote"></div>
+
     <h2>Remote Desktop support</h2>
     <p class="hint" style="font-size:13px">${s.rdpAvailable
       ? 'Installed. Windows and other Remote Desktop computers can be reached.'
@@ -1030,6 +1034,13 @@ async function openSettings() {
     void openSettings();
   });
   if (!$('#dlg-settings').open) $('#dlg-settings').showModal();
+
+  /* Filled in after the dialog is up: it asks the main process for the host's
+     state, and Settings must not wait on that — or fail to open if it errors. */
+  renderRemoteAccessSettings().catch(err => {
+    const box = $('#s-remote');
+    if (box) box.innerHTML = `<p class="hint">Remote access settings are unavailable: ${esc(err.message)}</p>`;
+  });
 }
 
 const toggle = (key, label, on) => `
@@ -1199,6 +1210,9 @@ api.onNotice?.(n => {
 (async () => {
   state.settings = await api.getSettings();
   await refresh();
+  /* The HopDesk-native half of the UI: this computer's own Device ID and code,
+     connecting to another computer, and the live session. */
+  if (api.hostStatus) initHopdesk({ api, toast, confirmDialog });
   // Lets automated tests know the UI is wired up.
   window.__hopdeskReady = true;
 })();

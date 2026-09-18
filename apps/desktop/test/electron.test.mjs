@@ -10,7 +10,7 @@ import path from 'node:path';
 import { launchApp, electronUnavailableReason, waitFor } from './helpers/electron.mjs';
 import { clickConnect, addViaUi, pixel, canvasPoint } from './helpers/ui.mjs';
 import {
-  startFakeRfbServer, update, rawRect, copyRect,
+  startFakeRfbServer, update, rawRect, copyRect, serverCutText,
 } from '../../../packages/core/test/helpers/fake-rfb-server.mjs';
 
 /**
@@ -95,7 +95,13 @@ test('Electron: preload bridge, VNC framebuffer, input, disconnect and reconnect
     await app.cdp.send('Input.dispatchMouseEvent', { type: 'mousePressed', x: p.x, y: p.y, button: 'left', buttons: 1, clickCount: 1 });
     await app.cdp.send('Input.dispatchMouseEvent', { type: 'mouseReleased', x: p.x, y: p.y, button: 'left', buttons: 0, clickCount: 1 });
     await app.cdp.send('Input.dispatchMouseEvent', { type: 'mouseWheel', x: p.x, y: p.y, deltaX: 0, deltaY: 120 });
-    await waitFor(() => server.of('pointer').some(e => e.mask === 16), 3000, 'wheel event');
+    /* Wait for the wheel press *and* the release that follows it: waiting for
+       the press alone races with the release still being in flight. */
+    const wheelDone = () => {
+      const at = server.of('pointer').filter(e => e.x === 100 && e.y === 50).findIndex(e => e.mask === 16);
+      return at >= 0 && server.of('pointer').filter(e => e.x === 100 && e.y === 50).length > at + 1;
+    };
+    await waitFor(wheelDone, 3000, 'a wheel press followed by its release');
     const pointers = server.of('pointer').filter(e => e.x === 100 && e.y === 50);
     assert.ok(pointers.some(e => e.mask === 1), `no left-button press at 100,50: ${JSON.stringify(server.of('pointer'))}`);
     const pressAt = pointers.findIndex(e => e.mask === 1);
@@ -156,6 +162,56 @@ test('Electron: preload bridge, VNC framebuffer, input, disconnect and reconnect
   }
 });
 
+
+/**
+ * The clipboard crosses the real system clipboard in both directions, which is
+ * the only way to exercise Electron's clipboard API — asynchronous since
+ * Electron 44, where a missed `await` silently sends nothing.
+ *
+ * HOPDESK_TEST_DISPLAY points the app at another X display (any spare Xvfb or
+ * Xtigervnc), so the clipboard of the machine running the tests is untouched.
+ * Without it, the test uses the current display and puts back the text it
+ * found there.
+ */
+test('Electron: the clipboard travels to the remote computer and back through the system clipboard',
+  { skip: skipReason ?? false, timeout: 90_000 }, async () => {
+  const canary = `hopdesk-clipboard-${Date.now()}`;
+  const server = await startFakeRfbServer({
+    width: W, height: H, name: 'clip',
+    onRequest: req => (req.incremental ? null : update(rawRect(0, 0, W, H, () => RED))),
+  });
+
+  const display = process.env.HOPDESK_TEST_DISPLAY;
+  const app = await launchApp({ env: display ? { ...ENV, DISPLAY: display } : ENV });
+  try {
+    const id = await addViaUi(app, { protocol: 'vnc', name: 'Clipboard', host: '127.0.0.1', port: server.port });
+    await clickConnect(app, id);
+    await app.waitFor(`return document.querySelector('#status')?.textContent.includes('Connected')`, 10_000, 'Connected status');
+
+    /* What was on the clipboard before, so it can be put back afterwards. */
+    await app.eval(`window.hopdesk.input({ type: 'clipboard-sync' }); return true`);
+    await new Promise(r => setTimeout(r, 500));
+    const original = server.of('cutText').at(-1)?.text ?? '';
+
+    /* Remote → local: the host's clipboard is written to this machine's. */
+    server.lastSocket.write(serverCutText(canary));
+
+    /* Local → remote: reading it back must produce exactly what arrived. */
+    await waitFor(async () => {
+      await app.eval(`window.hopdesk.input({ type: 'clipboard-sync' }); return true`);
+      return server.of('cutText').some(e => e.text === canary);
+    }, 10_000, 'the clipboard to make the round trip');
+
+    if (!display && original) {
+      server.lastSocket.write(serverCutText(original));
+      await new Promise(r => setTimeout(r, 500));
+    }
+  } finally {
+    await app.close();
+    await server.close();
+  }
+});
+
 test('Electron: a VNC password is requested, saved to a newly created vault, and never stored or logged in plaintext', { skip: skipReason ?? false, timeout: 90_000 }, async () => {
   const PASSWORD = 'vnc-e2e-pass';
   const PASSPHRASE = 'e2e-master-passphrase';
@@ -206,14 +262,19 @@ test('Electron: a VNC password is requested, saved to a newly created vault, and
     await server.close();
   }
 
-  // Nothing on disk or in the log contains the password or the passphrase.
+  /* Nothing anywhere under the data directory, or in the log, contains the
+     password or the passphrase — including the subdirectory the device
+     identity is kept in. */
   const dir = path.join(app.dataDir, 'hopdesk');
-  const files = await readdir(dir);
-  assert.ok(files.includes('credentials.vault') && files.includes('connections.json') && files.includes('hopdesk.log'), files.join());
-  for (const f of files) {
-    const raw = await readFile(path.join(dir, f), 'utf8');
-    assert.ok(!raw.includes(PASSWORD), `password in plaintext in ${f}`);
-    assert.ok(!raw.includes(PASSPHRASE), `passphrase in plaintext in ${f}`);
+  const files = await readdir(dir, { recursive: true, withFileTypes: true });
+  const names = files.map(f => f.name);
+  assert.ok(names.includes('credentials.vault') && names.includes('connections.json') && names.includes('hopdesk.log'), names.join());
+  for (const entry of files) {
+    if (!entry.isFile()) continue;
+    const full = path.join(entry.parentPath ?? entry.path ?? dir, entry.name);
+    const raw = await readFile(full, 'utf8');
+    assert.ok(!raw.includes(PASSWORD), `password in plaintext in ${full}`);
+    assert.ok(!raw.includes(PASSPHRASE), `passphrase in plaintext in ${full}`);
   }
 });
 
