@@ -58,6 +58,7 @@ contextBridge.exposeInMainWorld('hopdesk', {
   checkPermissions: () => ipcRenderer.invoke('checkPermissions'),
   requestPermissions: () => ipcRenderer.invoke('requestPermissions'),
   openPermissionSettings: action => ipcRenderer.invoke('openPermissionSettings', action),
+  relaunch: () => ipcRenderer.invoke('relaunch'),
   endHostSession: (id, reason) => ipcRenderer.invoke('endHostSession', id, reason),
   knownDevices: () => ipcRenderer.invoke('knownDevices'),
   forgetDevice: deviceId => ipcRenderer.invoke('forgetDevice', deviceId),

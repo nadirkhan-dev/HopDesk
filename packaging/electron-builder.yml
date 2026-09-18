@@ -115,7 +115,8 @@ linux:
       Keywords: remote;desktop;screen;sharing;support;vnc;rdp;
       StartupWMClass: HopDesk
 
-# macOS. Untested: no Mac has built this yet — see packaging/build-macos.sh.
+# macOS. Built and started on GitHub's Mac runners by the release workflow;
+# not yet run by a person on a real Mac.
 mac:
   category: public.app-category.utilities
   target:
@@ -139,6 +140,9 @@ mac:
 
 dmg:
   title: HopDesk ${version}
+  # The architecture in every name: by default the Intel one would have none,
+  # and the two would be easy to confuse on a download page.
+  artifactName: ${productName}-${version}-${arch}.${ext}
 
 deb:
   # FreeRDP is what RDP sessions run on. Recommended rather than required so

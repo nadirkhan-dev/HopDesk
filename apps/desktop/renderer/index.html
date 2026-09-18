@@ -155,6 +155,17 @@
   #cd-more > summary { font-size: 12px; color: var(--text-dim); cursor: pointer; margin-top: 8px; }
   .hd-view { flex: 1; display: flex; flex-direction: column; background: #000; min-width: 0; }
   .hd-bar { display: flex; align-items: center; gap: 8px; padding: 6px 10px; background: var(--surface); border-bottom: 1px solid var(--border); }
+  .perms { margin-top: 10px; display: grid; gap: 8px; }
+  .perm { border: 1px solid var(--border, #444); border-radius: 8px; padding: 8px 10px; font-size: 13px; }
+  .perm .perm-head { display: flex; align-items: center; gap: 8px; font-weight: 600; }
+  .perm .perm-state { margin-left: auto; font-weight: 600; }
+  .perm.ok .perm-state { color: #3fb950; }
+  .perm.missing .perm-state { color: #f0883e; }
+  .perm p { margin: 4px 0 0; color: var(--text-dim, #aaa); }
+  .perm .btn { margin-top: 6px; }
+  .hd-notice { background: #5a3b00; color: #ffe2a8; padding: 8px 14px; font-size: 13px; line-height: 1.4; }
+  .hd-notice p { margin: 0; }
+  .hd-notice p + p { margin-top: 4px; }
   #hd-video { flex: 1; width: 100%; height: 100%; object-fit: contain; background: #000; outline: none; min-height: 0; }
   body.hd-session aside, body.hd-session #pane { display: none; }
   .nearby { border-top: 1px solid var(--border); max-height: 40%; display: flex; flex-direction: column; }
@@ -344,6 +355,8 @@
       <p class="hint" id="mine-protection"></p>
       <p class="warn-text" id="mine-detail" hidden></p>
       <button class="btn small" id="mine-fix" hidden>Open System Settings</button>
+      <!-- macOS: every permission hosting needs, allowed or not. -->
+      <div class="perms" id="mine-perms" hidden></div>
       <div id="mine-sessions" hidden></div>
     </section>
 
@@ -405,6 +418,8 @@
       <button class="btn ghost" id="hd-fullscreen" title="Ctrl+Alt+Enter">Fullscreen</button>
       <button class="btn" id="hd-disconnect">Disconnect</button>
     </header>
+    <!-- What the other computer says it cannot do, and what to do about it. -->
+    <div class="hd-notice" id="hd-notice" role="status" hidden></div>
     <!-- tabindex so the element takes keyboard focus and can forward keys. -->
     <video id="hd-video" tabindex="0" autoplay playsinline muted></video>
   </section>

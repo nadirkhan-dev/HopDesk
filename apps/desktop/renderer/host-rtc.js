@@ -51,7 +51,10 @@ const sessions = servePeerCalls({
 /** This computer's clipboard changed: pass it to every viewer. */
 bridge.onHostSend(({ sessionId, label, message }) => {
   const session = sessions.get(sessionId);
-  if (session) session.send(label, message);
+  if (!session) return;
+  // Notices go out as soon as a session connects, which can be before its channel is open.
+  const dropped = session.send(label, message, { queue: label === 'display' });
+  if (dropped) bridge.hostLog(`session ${sessionId}: ${label} message not sent: ${dropped}`);
 });
 
 bridge.hostReady();

@@ -1,14 +1,15 @@
-# Publishes installable Linux packages to GitHub Releases.
+# Publishes installable packages to GitHub Releases: an AppImage and a .deb for
+# Linux, and a .dmg for each kind of Mac.
 #
-# This builds the same AppImage and .deb that CI builds, runs the same test
-# against them — two packaged copies started and connected to each other — and
-# only then attaches them to a release. A package nobody started is a package
-# nobody tested, so the test is not optional here: if it fails, nothing is
-# published.
+# Every package is built, then installed or started and tested, and only if all
+# of them pass is anything published. A package nobody started is a package
+# nobody tested.
 #
-# macOS and Windows are deliberately absent. HopDesk has no Host backend for
-# Windows at all, and the macOS backend has not yet been verified on real
-# hardware. Shipping an installer for either would imply something untrue.
+# The Mac builds are signed ad hoc, not with a Developer ID: macOS asks before
+# the first launch (the release notes say how to get past it). What a CI Mac
+# can and cannot prove is written in apps/desktop/test/packaged-macos.test.mjs.
+#
+# Windows is absent: HopDesk has no Host backend for Windows at all.
 
 name: Release
 
@@ -21,6 +22,11 @@ on:
         description: "Tag for the release, e.g. v0.1.0 (created if it does not exist)"
         required: true
         type: string
+      publish:
+        description: "Publish the release (off: build and test every package, publish nothing)"
+        required: false
+        type: boolean
+        default: true
 
 permissions:
   contents: write
@@ -57,31 +63,127 @@ jobs:
           DISPLAY=:31 HOPDESK_REQUIRE_PACKAGE=1 HOPDESK_HOST_DISPLAY=:31 HOPDESK_VIEWER_DISPLAY=:32 \
             node --test --test-timeout=300000 apps/desktop/test/packaged.test.mjs
 
+      - uses: actions/upload-artifact@v4
+        with:
+          name: linux
+          path: |
+            dist-packages/*.AppImage
+            dist-packages/*.deb
+          if-no-files-found: error
+
+  macos:
+    name: macOS .dmg (${{ matrix.arch }})
+    # Apple Silicon builds both: the Intel one carries koffi's Intel module
+    # (build-macos.sh installs it) and is tested under Rosetta.
+    runs-on: macos-14
+    strategy:
+      fail-fast: true
+      matrix:
+        arch: [arm64, x64]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+
+      - name: Rosetta, to run the Intel build
+        if: matrix.arch == 'x64'
+        run: |
+          arch -x86_64 /usr/bin/true 2>/dev/null \
+            || sudo softwareupdate --install-rosetta --agree-to-license
+
+      - name: Build the .dmg
+        env:
+          HOPDESK_MAC_ARCH: ${{ matrix.arch }}
+          # No certificate here: signed ad hoc, never with a stray keychain identity.
+          CSC_IDENTITY_AUTO_DISCOVERY: "false"
+        run: bash packaging/build-macos.sh
+
+      - name: Check the bundle's architecture and signature
+        run: |
+          set -euo pipefail
+          DMG=$(ls dist-packages/HopDesk-*-${{ matrix.arch }}.dmg)
+          echo "DMG=$DMG" >> "$GITHUB_ENV"
+          hdiutil attach -nobrowse -readonly -mountpoint /tmp/hopdesk-dmg "$DMG"
+          ditto /tmp/hopdesk-dmg/HopDesk.app "$RUNNER_TEMP/Applications/HopDesk.app"
+          hdiutil detach /tmp/hopdesk-dmg
+          APP="$RUNNER_TEMP/Applications/HopDesk.app"
+          echo "HOPDESK_MAC_APP=$APP" >> "$GITHUB_ENV"
+          want=$([ "${{ matrix.arch }}" = x64 ] && echo x86_64 || echo arm64)
+          lipo -archs "$APP/Contents/MacOS/HopDesk" | tee /dev/stderr | grep -qw "$want"
+          KOFFI=$(find "$APP" -path "*koffi-darwin-${{ matrix.arch }}*" -name koffi.node | head -1)
+          test -n "$KOFFI" || { echo "koffi's darwin-${{ matrix.arch }} module is not in the bundle" >&2; exit 1; }
+          lipo -archs "$KOFFI" | tee /dev/stderr | grep -qw "$want"
+          # A valid signature, ad hoc: without one Apple Silicon calls the app damaged.
+          codesign --verify --deep --strict --verbose=2 "$APP"
+          codesign -dv "$APP" 2>&1 | tee /dev/stderr | grep -q "Signature=adhoc"
+
+      - name: Start the installed app
+        run: |
+          HOPDESK_REQUIRE_PACKAGE=1 \
+            node --test --test-timeout=240000 apps/desktop/test/packaged-macos.test.mjs
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: macos-${{ matrix.arch }}
+          path: ${{ env.DMG }}
+          if-no-files-found: error
+
+  publish:
+    name: Publish the release
+    needs: [linux, macos]
+    # success(): a custom condition otherwise replaces "only if every build passed".
+    if: success() && (github.event_name == 'push' || inputs.publish)
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: packages
+          merge-multiple: true
+
       - name: Checksums
-        working-directory: dist-packages
-        run: sha256sum *.AppImage *.deb | tee SHA256SUMS.txt
+        working-directory: packages
+        run: |
+          ls -la
+          sha256sum *.AppImage *.deb *.dmg | tee SHA256SUMS.txt
 
       - name: Publish the release
         env:
           GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
           TAG: ${{ inputs.tag || github.ref_name }}
         run: |
           set -euo pipefail
           cat > /tmp/notes.md <<'NOTES'
           ## Install
 
+          **Mac** — download the `.dmg` for your Mac: `arm64` for Apple Silicon
+          (M1 and later), `x64` for Intel. Not sure? Apple menu → About This Mac:
+          "Chip: Apple M…" means arm64, "Processor: Intel" means x64.
+
+          1. Open the `.dmg` and drag HopDesk into Applications.
+          2. Open HopDesk from Applications. macOS says it cannot check it for
+             malicious software, because this build is not signed with an Apple
+             Developer ID. Click **Done** (not Move to Bin).
+          3. Open **System Settings → Privacy & Security**, scroll to the
+             message about HopDesk, click **Open Anyway**, and confirm with your
+             password. After this once, HopDesk opens normally.
+          4. In HopDesk, **This computer** lists Screen Recording and
+             Accessibility. For each one marked "Not allowed", press its button,
+             switch HopDesk on, and come back. Screen Recording needs HopDesk to
+             restart — the **Reopen HopDesk** button does it.
+
+          Each new version is a new unsigned app to macOS: expect to repeat
+          step 3, and possibly to switch the two permissions off and on again.
+
           **Debian, Ubuntu, Mint, Pop!_OS** — download the `.deb` and:
 
               sudo apt install ./hopdesk_*_amd64.deb
-              hopdesk
 
-          **Any other Linux** — download the `.AppImage` and:
-
-              chmod +x HopDesk-*.AppImage
-              ./HopDesk-*.AppImage
-
-          If it complains about FUSE, either install `libfuse2` or run it with
-          `--appimage-extract-and-run`.
+          **Any other Linux** — download the `.AppImage`, then
+          `chmod +x HopDesk-*.AppImage` and run it. If it complains about FUSE,
+          install `libfuse2` or run it with `--appimage-extract-and-run`.
 
           Verify a download against `SHA256SUMS.txt`:
 
@@ -89,25 +191,22 @@ jobs:
 
           ## What is tested in this build
 
-          Both packages were built and then started on a real X display, with two
-          packaged copies connecting to each other, before this release was created.
-
-          Hosting from a Linux Xorg session has also been used on real hardware:
-          connecting by Device ID and access code, the Allow prompt, the live
-          desktop, and mouse and keyboard.
+          - Linux: both packages were built and started on a real X display,
+            with two packaged copies connecting and one controlling the other.
+          - Mac: each `.dmg` was installed and started on a GitHub Mac, its
+            architecture and signature checked, and its input backend loaded.
+            A CI Mac cannot be given Screen Recording or Accessibility, so
+            sharing a Mac's screen and controlling it have **not** been tested
+            by this build.
 
           ## What is not
 
-          - **Linux on Wayland cannot share its screen.** Input works (through the
-            xdg-desktop-portal RemoteDesktop portal), but screen capture does not:
-            an X11 capturer cannot read the root window under Mutter. Log into an
-            Xorg session to host, or host from the other machine.
-          - **No Windows or macOS packages.** There is no Host backend for Windows,
-            and the macOS one has not been verified on real hardware yet. Both
-            platforms can build the project from source and act as a viewer.
+          - **Linux on Wayland cannot share its whole screen.** Log into an Xorg
+            session to host, or host from the other machine.
+          - **No Windows package.** There is no Host backend for Windows.
           NOTES
 
-          FILES=(dist-packages/*.AppImage dist-packages/*.deb dist-packages/SHA256SUMS.txt)
+          FILES=(packages/*.AppImage packages/*.deb packages/*.dmg packages/SHA256SUMS.txt)
           if gh release view "$TAG" >/dev/null 2>&1; then
             echo "Release $TAG exists; replacing its files."
             gh release upload "$TAG" "${FILES[@]}" --clobber

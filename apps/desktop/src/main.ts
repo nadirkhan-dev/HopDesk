@@ -1,6 +1,7 @@
 import {
   app, BrowserWindow, ipcMain, shell, Menu, clipboard, screen, desktopCapturer,
   session as electronSession,
+  systemPreferences,
   type IpcMainInvokeEvent, type IpcMainEvent,
 } from 'electron';
 import { hostname } from 'node:os';
@@ -23,6 +24,7 @@ import { HostRole } from './host.js';
 import { ViewerRole } from './viewer.js';
 import { openInputController, linuxBackend, type InputController } from '@hopdesk/platform';
 import { createPermissionManager, openPermissionSettings, type PermissionReport } from './permissions.js';
+import { viewerNotices } from './permission-report.js';
 import {
   MAX_CLIPBOARD_CHARS, unattendedVerifier, type ConsentDecision, type ConsentRequest,
 } from '@hopdesk/protocol';
@@ -193,7 +195,37 @@ let inputUnavailable: string | null = null;
  */
 function hostInput(): InputController | null {
   if (!inputController && !inputUnavailable && !preparingInput) void prepareInput();
+  /* On macOS, events posted without Accessibility are dropped by the system
+     with no error, so injecting them would count as success while nothing
+     moved. Refuse instead, and say why. */
+  if (inputController && macAccessibilityOff()) return null;
   return inputController;
+}
+
+/** Why this computer cannot take a viewer's mouse and keyboard right now, or null. */
+function inputProblem(): string | null {
+  if (macAccessibilityOff()) {
+    return 'macOS Accessibility is off for HopDesk (System Settings → Privacy & Security → Accessibility)';
+  }
+  return inputUnavailable ?? (preparingInput ? 'input is still being set up' : null);
+}
+
+/* Asked at most once a second: it is checked for every input message. */
+let accessibilityChecked = 0;
+let accessibilityOff = false;
+function macAccessibilityOff(): boolean {
+  if (process.platform !== 'darwin') return false;
+  const now = Date.now();
+  if (now - accessibilityChecked > 1000) {
+    accessibilityChecked = now;
+    const off = !systemPreferences.isTrustedAccessibilityClient(false);
+    if (off !== accessibilityOff) {
+      accessibilityOff = off;
+      // Turned on or off in System Settings while HopDesk runs: refresh what is shown and sent.
+      void refreshPermissions(false).then(() => permissionsChanged());
+    }
+  }
+  return accessibilityOff;
 }
 
 let preparingInput: Promise<string | null> | null = null;
@@ -258,9 +290,29 @@ function waylandLimitation(): string | null {
 }
 
 async function refreshPermissions(request = false): Promise<PermissionReport> {
-  permissionReport = request ? await permissions.request() : await permissions.check();
-  if (permissionReport.detail) log.warn(`permissions: ${permissionReport.detail}`);
-  return permissionReport;
+  const before = JSON.stringify(permissionReport?.items.map(i => [i.id, i.state]) ?? null);
+  const report = request ? await permissions.request() : await permissions.check();
+  permissionReport = report;
+  const after = JSON.stringify(report.items.map(i => [i.id, i.state]));
+  if (before !== after && report.items.length) {
+    log.info(`permissions: ${report.items.map(i => `${i.name} ${i.granted ? 'allowed' : 'not allowed'}`).join(', ')}`);
+    if (report.detail) log.warn(`permissions: ${report.detail}`);
+  }
+  return report;
+}
+
+/** Tells the window, and anyone connected, that what this computer can share has changed. */
+function permissionsChanged() {
+  if (host) send('hostStatus', hostStatusPayload());
+  host?.refreshNotices();
+}
+
+/** What a viewer should be told about this computer before they wonder why. */
+function notices(): string[] {
+  const wayland = waylandLimitation()
+    ? 'The other computer is on a Wayland desktop, which HopDesk cannot fully capture yet: you may see only some of its windows.'
+    : null;
+  return viewerNotices(permissionReport, inputProblem(), [wayland]);
 }
 
 /**
@@ -327,7 +379,8 @@ function createRoles(identity: LocalIdentity) {
       return { peer, close: () => closeHostWindowIfIdle() };
     },
     input: hostInput,
-    inputProblem: () => inputUnavailable ?? (preparingInput ? 'input is still being set up' : null),
+    inputProblem,
+    notices,
     // Only a signed-in computer can authorise an account connection.
     accountAuthorised: (viewerId, viewerKey) => account?.authorises(viewerId, viewerKey) ?? false,
     iceServers: () => account?.iceServers() ?? Promise.resolve([]),
@@ -350,9 +403,13 @@ function createRoles(identity: LocalIdentity) {
     },
     shareClipboard: () => settings.get().defaults.shareClipboard !== false,
   });
-  hostRole.on('change', () => send('hostStatus', hostRole.status()));
+  // The whole status, permissions included: a partial one would blank them in the window.
+  hostRole.on('change', () => send('hostStatus', hostStatusPayload()));
   hostRole.on('clipboard', (sessionId: string, message: unknown) => {
     rtc.post(sessionId, 'host:send', { sessionId, label: 'clipboard', message });
+  });
+  hostRole.on('notice', (sessionId: string, message: unknown) => {
+    rtc.post(sessionId, 'host:send', { sessionId, label: 'display', message });
   });
 
   const viewerRole = new ViewerRole({
@@ -479,6 +536,15 @@ app.whenReady().then(async () => {
 
   createWindow();
   app.on('activate', () => { if (!BrowserWindow.getAllWindows().length) createWindow(); });
+
+  /* On a Mac, what the system allows is shown from the start — not only after
+     remote access is switched on — and checked again whenever HopDesk comes
+     back to the front, which is what happens after a trip to System Settings. */
+  if (process.platform === 'darwin') {
+    await refreshPermissions(false);
+    permissionsChanged();
+    app.on('browser-window-focus', () => { void refreshPermissions(false).then(permissionsChanged); });
+  }
 
   if (host && settings.get().remoteAccess.enabled) {
     try {
@@ -969,13 +1035,26 @@ const hostUnavailable = () => ({
   sessions: [],
 });
 
-handle('hostStatus', () => ({
-  ...(host ? host.status() : hostUnavailable()),
-  ...(waylandLimitation() ? { detail: waylandLimitation() } : {}),
-  permissions: permissionReport,
-  inputAvailable: inputUnavailable === null,
-  ...(inputUnavailable ? { inputDetail: inputUnavailable } : {}),
-}));
+function hostStatusPayload() {
+  const problem = inputProblem();
+  return {
+    ...(host ? host.status() : hostUnavailable()),
+    ...(waylandLimitation() ? { detail: waylandLimitation() } : {}),
+    permissions: permissionReport,
+    inputAvailable: problem === null,
+    ...(problem ? { inputDetail: problem } : {}),
+  };
+}
+
+handle('hostStatus', () => hostStatusPayload());
+
+/* Screen Recording only takes effect after HopDesk restarts; this does it. */
+handle('relaunch', () => {
+  log.info('restarting at the user\'s request, to apply a permission');
+  app.relaunch();
+  app.quit();
+  return { ok: true };
+});
 
 handle('checkPermissions', () => refreshPermissions(false));
 handle('requestPermissions', () => refreshPermissions(true));

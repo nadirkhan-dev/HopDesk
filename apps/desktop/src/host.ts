@@ -63,6 +63,8 @@ export interface HostDependencies {
   input: () => InputController | null;
   /** Why input cannot be injected right now, for the log; null when it can. */
   inputProblem?: () => string | null;
+  /** What a viewer should be told about the limits of this computer, in plain words. */
+  notices?: () => string[];
   /**
    * Whether a device may connect because it is on the same HopDesk account.
    * Absent when this computer is not signed in, which refuses account
@@ -83,6 +85,8 @@ interface RunningSession {
   info: HostSessionInfo;
   clipboardSeq: number;
   input: InputStats;
+  /** The notices last sent to this viewer, so they go again only when they change. */
+  noticesSent: string | null;
 }
 
 export class HostRole extends EventEmitter {
@@ -248,6 +252,7 @@ export class HostRole extends EventEmitter {
     const running: RunningSession = {
       session, peer: null, info, clipboardSeq: 0,
       input: new InputStats(session.sessionId, line => this.deps.log.info(line)),
+      noticesSent: null,
     };
     this.sessions.set(session.sessionId, running);
     this.emit('change');
@@ -281,6 +286,7 @@ export class HostRole extends EventEmitter {
       this.startClipboardWatch();
       this.emit('change');
       this.deps.log.info(`session ${session.sessionId} media connected`);
+      this.sendNotices(running, true);
     } catch (err) {
       this.deps.log.warn(`session ${session.sessionId} could not start the screen connection: ${(err as Error).message}`);
       this.endSession(session.sessionId, 'error');
@@ -314,6 +320,8 @@ export class HostRole extends EventEmitter {
     const input = this.deps.input();
     if (!input) {
       stats.drop(`no input controller: ${this.deps.inputProblem?.() ?? 'unavailable'}`);
+      // The viewer is told, not left wondering why its mouse does nothing.
+      this.sendNotices(running);
       return;
     }
     try {
@@ -346,6 +354,31 @@ export class HostRole extends EventEmitter {
       // Thrown inside an IPC listener, this would reach stderr and never the log.
       stats.drop(`injection failed: ${(err as Error).message.slice(0, 120)}`);
     }
+  }
+
+  /** Sends every session its notices again, if they changed — say, a permission was just granted. */
+  refreshNotices() {
+    for (const running of this.sessions.values()) this.sendNotices(running);
+  }
+
+  /**
+   * What the viewer should know about this computer's limits: that it cannot be
+   * controlled, or that its screen cannot be recorded, and what to do about it.
+   * Sent on the display channel, which viewers that do not know the message
+   * simply ignore. `always` sends an empty list too, so a viewer knows all is well.
+   */
+  private sendNotices(running: RunningSession, always = false) {
+    if (running.info.state !== 'connected') return;
+    const notices = this.deps.notices?.() ?? [];
+    const key = JSON.stringify(notices);
+    if (key === running.noticesSent && !always) return;
+    if (key !== running.noticesSent && notices.length) {
+      this.deps.log.info(`session ${running.info.id}: telling the viewer: ${notices.join(' | ')}`);
+    } else if (key !== running.noticesSent && running.noticesSent) {
+      this.deps.log.info(`session ${running.info.id}: telling the viewer the earlier problem is resolved`);
+    }
+    running.noticesSent = key;
+    this.emit('notice', running.info.id, { type: 'host-notice', notices });
   }
 
   private readonly strayInput = new Set<string>();

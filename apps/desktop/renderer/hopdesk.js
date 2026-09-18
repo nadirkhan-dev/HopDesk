@@ -46,9 +46,12 @@ export function initHopdesk({ api, toast, confirmDialog }) {
     const detail = permissionDetail ?? status.detail ?? (status.inputAvailable === false ? status.inputDetail : '');
     $('#mine-detail').textContent = detail ?? '';
     $('#mine-detail').hidden = !detail;
+    const items = status.permissions?.items ?? [];
     const fix = $('#mine-fix');
-    fix.hidden = !status.permissions?.action;
+    // Where every permission is listed with its own button, the single one is redundant.
+    fix.hidden = !status.permissions?.action || items.length > 0;
     fix.onclick = () => api.openPermissionSettings(status.permissions.action);
+    renderPermissions(items);
     $('#mine-protection').textContent = status.deviceId ? `Identity key: ${status.keyProtection}` : '';
 
     const sessions = $('#mine-sessions');
@@ -67,6 +70,54 @@ export function initHopdesk({ api, toast, confirmDialog }) {
       sessions.append(row);
     }
   };
+
+  /**
+   * Each permission macOS asks for, allowed or not: what it is for, where to
+   * switch it on, and a button that opens that exact pane. Checked again each
+   * time HopDesk comes back to the front, so the list follows System Settings.
+   */
+  const screenRecordingMissingAtSomePoint = { value: false };
+  function renderPermissions(items) {
+    const box = $('#mine-perms');
+    box.hidden = !items.length;
+    box.replaceChildren();
+    for (const item of items) {
+      const row = document.createElement('div');
+      row.className = `perm ${item.granted ? 'ok' : 'missing'}`;
+      row.dataset.permission = item.id;
+      const head = document.createElement('div');
+      head.className = 'perm-head';
+      const name = document.createElement('span');
+      name.textContent = item.name;
+      const state = document.createElement('span');
+      state.className = 'perm-state';
+      state.textContent = item.granted ? '✓ Allowed' : '✗ Not allowed';
+      head.append(name, state);
+      row.append(head);
+      if (!item.granted) {
+        if (item.id === 'screen-recording') screenRecordingMissingAtSomePoint.value = true;
+        const why = document.createElement('p');
+        why.textContent = item.why;
+        const how = document.createElement('p');
+        how.textContent = item.how;
+        const open = document.createElement('button');
+        open.className = 'btn small';
+        open.textContent = `Open ${item.name} settings`;
+        open.onclick = () => api.openPermissionSettings(item.action);
+        row.append(why, how, open);
+      } else if (item.id === 'screen-recording' && screenRecordingMissingAtSomePoint.value) {
+        /* Switched on while HopDesk was running: macOS applies it only after a restart. */
+        const note = document.createElement('p');
+        note.textContent = 'Just allowed. macOS applies this after HopDesk restarts.';
+        const restart = document.createElement('button');
+        restart.className = 'btn small primary';
+        restart.textContent = 'Reopen HopDesk';
+        restart.onclick = () => api.relaunch();
+        row.append(note, restart);
+      }
+      box.append(row);
+    }
+  }
 
   const refreshHost = async () => renderHost(await api.hostStatus());
 
@@ -317,7 +368,23 @@ export function initHopdesk({ api, toast, confirmDialog }) {
     how.hidden = !how.textContent;
   }
 
+  /**
+   * What the other computer says it cannot do — be controlled, have its screen
+   * recorded — shown over the session so a mouse that does nothing is explained.
+   * Plain text only, bounded, from a peer that has already authenticated.
+   */
+  function showNotices(list, sessionId) {
+    const notices = Array.isArray(list)
+      ? list.filter(n => typeof n === 'string' && n.trim()).slice(0, 4).map(n => n.slice(0, 400))
+      : [];
+    const box = $('#hd-notice');
+    box.replaceChildren(...notices.map(text => { const p = document.createElement('p'); p.textContent = text; return p; }));
+    box.hidden = !notices.length;
+    api.viewerLog?.(`session ${sessionId}: the other computer reports ${notices.length ? notices.length + ' problem(s)' : 'no problems'}`);
+  }
+
   function hideSession() {
+    $('#hd-notice').hidden = true;
     document.body.classList.remove('hd-session');
     $('#hd-view').hidden = true;
     $('#hd-status').textContent = 'Not connected';
@@ -359,6 +426,7 @@ export function initHopdesk({ api, toast, confirmDialog }) {
           void video.play().catch(() => {});
         },
         onChannelMessage: (label, message) => {
+          if (label === 'display' && message?.type === 'host-notice') { showNotices(message.notices, sessionId); return; }
           if (label !== 'clipboard' || typeof message?.text !== 'string') return;
           // The other computer's clipboard, put on this one's.
           ui.lastClipboardSent = message.text;

@@ -1,5 +1,6 @@
 import { shell, systemPreferences } from 'electron';
 import type { PermissionManager, PermissionState } from '@hopdesk/platform';
+import { macReport, type PermissionReport } from './permission-report.js';
 
 /**
  * What the operating system has to allow before this computer can be shared.
@@ -15,23 +16,23 @@ import type { PermissionManager, PermissionState } from '@hopdesk/platform';
  * the portal, which is handled where the portal is used, not here.
  */
 
-export interface PermissionReport {
-  capture: PermissionState;
-  input: PermissionState;
-  detail?: string;
-  /** Something the user can do about it, when there is something. */
-  action?: 'open-screen-recording' | 'open-accessibility';
+export type { PermissionReport } from './permission-report.js';
+
+/** The platform's permission manager, reporting every permission rather than the first missing one. */
+interface Permissions extends PermissionManager {
+  check(): Promise<PermissionReport>;
+  request(): Promise<PermissionReport>;
 }
 
 const SCREEN_RECORDING_PANE = 'x-apple.systempreferences:com.apple.preference.security?Privacy_ScreenCapture';
 const ACCESSIBILITY_PANE = 'x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility';
 
-class MacPermissions implements PermissionManager {
+class MacPermissions implements Permissions {
   async check(): Promise<PermissionReport> {
-    const capture = toState(systemPreferences.getMediaAccessStatus('screen'));
     // `false` asks nothing; it only reports whether the permission is there.
-    const input: PermissionState = systemPreferences.isTrustedAccessibilityClient(false) ? 'granted' : 'prompt';
-    return this.describe(capture, input);
+    return macReport(
+      toState(systemPreferences.getMediaAccessStatus('screen')),
+      systemPreferences.isTrustedAccessibilityClient(false) ? 'granted' : 'prompt');
   }
 
   async request(): Promise<PermissionReport> {
@@ -39,45 +40,22 @@ class MacPermissions implements PermissionManager {
        shows it the first time something actually captures, so the Host's first
        capture is the prompt. Accessibility does have one. */
     const input: PermissionState = systemPreferences.isTrustedAccessibilityClient(true) ? 'granted' : 'prompt';
-    const capture = toState(systemPreferences.getMediaAccessStatus('screen'));
-    return this.describe(capture, input);
-  }
-
-  private describe(capture: PermissionState, input: PermissionState): PermissionReport {
-    if (capture !== 'granted') {
-      return {
-        capture,
-        input,
-        detail: 'macOS has not allowed HopDesk to record the screen yet. '
-          + 'Open Privacy & Security → Screen Recording, switch HopDesk on, then quit and reopen HopDesk.',
-        action: 'open-screen-recording',
-      };
-    }
-    if (input !== 'granted') {
-      return {
-        capture,
-        input,
-        detail: 'Someone connecting can see this screen but cannot control it. '
-          + 'Open Privacy & Security → Accessibility and switch HopDesk on to allow the mouse and keyboard.',
-        action: 'open-accessibility',
-      };
-    }
-    return { capture, input };
+    return macReport(toState(systemPreferences.getMediaAccessStatus('screen')), input);
   }
 }
 
-class NoPermissionsNeeded implements PermissionManager {
+class NoPermissionsNeeded implements Permissions {
   private readonly report: PermissionReport;
   constructor(detail?: string) {
     this.report = detail
-      ? { capture: 'unsupported', input: 'unsupported', detail }
-      : { capture: 'granted', input: 'granted' };
+      ? { capture: 'unsupported', input: 'unsupported', items: [], detail }
+      : { capture: 'granted', input: 'granted', items: [] };
   }
   async check() { return this.report; }
   async request() { return this.report; }
 }
 
-export function createPermissionManager(): PermissionManager {
+export function createPermissionManager(): Permissions {
   if (process.platform === 'darwin') return new MacPermissions();
   if (process.platform === 'linux') return new NoPermissionsNeeded();
   return new NoPermissionsNeeded(`HopDesk cannot share this computer's screen on ${process.platform} yet.`);

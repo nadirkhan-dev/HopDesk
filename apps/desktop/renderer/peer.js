@@ -100,10 +100,20 @@ export function createPeerSession({ role, sessionId, bridge, iceServers = [], ge
 
   pc.ondatachannel = e => wireChannel(e.channel);
 
+  /** Messages waiting for their channel to open, by label. */
+  const pending = new Map();
+
   function wireChannel(channel) {
     channels.set(channel.label, channel);
     let unreadable = 0;
-    channel.onopen = () => log(`${channel.label} channel open`);
+    const flush = () => {
+      const waiting = pending.get(channel.label) ?? [];
+      pending.delete(channel.label);
+      for (const message of waiting) channel.send(JSON.stringify(message));
+      if (waiting.length) log(`${channel.label} channel: sent ${waiting.length} message(s) held until it opened`);
+    };
+    channel.onopen = () => { log(`${channel.label} channel open`); flush(); };
+    if (channel.readyState === 'open') flush();
     channel.onmessage = ev => {
       if (!onChannelMessage) return;
       let message;
@@ -128,9 +138,18 @@ export function createPeerSession({ role, sessionId, bridge, iceServers = [], ge
    * it was not — which the caller counts, because a message dropped here is
    * otherwise dropped without a trace.
    */
-  function send(label, message) {
+  function send(label, message, { queue = false } = {}) {
     if (closed) return 'the session is closed';
     const channel = channels.get(label);
+    /* Held until the channel opens, for messages that must not be lost to a race
+       with the channel opening. Never used for input: a pointer position that
+       arrives late is wrong, not late. */
+    if (queue && (!channel || channel.readyState === 'connecting')) {
+      const waiting = pending.get(label) ?? [];
+      if (waiting.length < 10) waiting.push(message);
+      pending.set(label, waiting);
+      return null;
+    }
     if (!channel) return `no ${label} channel`;
     if (channel.readyState !== 'open') return `${label} channel ${channel.readyState}`;
     channel.send(JSON.stringify(message));

@@ -46,8 +46,8 @@ const skip = refuseToSkip(electronUnavailableReason()
 const ENV = { HOPDESK_CREDENTIAL_BACKEND: 'file' };
 
 /** Starts the app as the Host, turns remote access on, and reads its details. */
-async function startHost() {
-  const app = await launchApp({ env: { ...ENV, DISPLAY: hostDisplay } });
+async function startHost(env = {}) {
+  const app = await launchApp({ env: { ...ENV, DISPLAY: hostDisplay, ...env } });
   await app.eval(`document.querySelector('#mine-toggle').click(); return true`);
   try {
     await app.waitFor(`return document.querySelector('#mine-state')?.textContent === 'Online'`, 15_000, 'the host to come online');
@@ -113,6 +113,7 @@ async function pointerReachesHost(viewer, fraction, what) {
 }
 
 /** The host's log, where input counters are written. */
+const hostLogText = app => hostLog(app).catch(() => '');
 async function hostLog(app) {
   const { readFile } = await import('node:fs/promises');
   return readFile(path.join(app.dataDir, 'hopdesk', 'hopdesk.log'), 'utf8');
@@ -143,6 +144,11 @@ test('a viewer connects to a host by Device ID and access code, sees its screen 
     assert.ok(video.width >= 320 && video.height >= 240, `implausible video size ${video.width}x${video.height}`);
     await waitFor(async () => (await viewer.eval(`return document.querySelector('#hd-video').currentTime`)) > 0,
       20_000, 'the video to keep playing');
+    /* A host with nothing wrong tells the viewer so, and no warning is shown. */
+    await waitFor(async () => /the other computer reports no problems/.test(await hostLogText(viewer)) || null,
+      15_000, 'the host to report its state to the viewer');
+    assert.equal(await viewer.eval(`return document.querySelector('#hd-notice').hidden`), true,
+      'a warning is shown for a host with nothing wrong');
 
     /* The host shows the session, named after the viewer. */
     const sessions = await host.eval(`
@@ -374,6 +380,35 @@ test('a second session in the same viewer gets input too, and both sides log wha
     assert.doesNotMatch(hostLines + viewerLines, /KeyB|"b"|keysym/, 'a log names the keys that were pressed');
   } finally {
     xev.child.kill('SIGKILL');
+    await viewer.close();
+    await host.close();
+  }
+});
+
+test('a host that cannot fully share its screen tells the viewer, in plain words, on the viewer\'s screen',
+  { skip, timeout: 180_000 }, async () => {
+  /* What the launcher sets on a Wayland desktop, where capture sees only X11
+     windows. The viewer must not be left to find that out by looking. */
+  const host = await startHost({ HOPDESK_DESKTOP_SESSION: 'wayland' });
+  const viewer = await startViewer();
+  try {
+    await connect(viewer, host);
+    await host.waitFor(`return document.querySelector('#dlg-consent')?.open === true`, 25_000, 'the Allow prompt');
+    await allow(host);
+    await viewer.waitFor(`const v = document.querySelector('#hd-video'); return v.videoWidth > 0 && v.readyState >= 2`,
+      45_000, 'video');
+    const notice = await viewer.waitFor(`
+      const box = document.querySelector('#hd-notice');
+      return box.hidden ? null : box.textContent`, 15_000, 'the notice on the viewer');
+    assert.match(notice, /Wayland desktop/);
+    assert.match(notice, /only some of its windows/);
+    assert.match(await hostLog(host), /telling the viewer: The other computer is on a Wayland desktop/);
+    /* Input is not affected by this limit, and still works. */
+    await pointerReachesHost(viewer, 0.5, 'with a notice showing');
+    /* The notice belongs to that session and goes with it. */
+    await viewer.eval(`document.querySelector('#hd-disconnect').click(); return true`);
+    await viewer.waitFor(`return document.querySelector('#hd-notice').hidden === true`, 15_000, 'the notice to go with the session');
+  } finally {
     await viewer.close();
     await host.close();
   }

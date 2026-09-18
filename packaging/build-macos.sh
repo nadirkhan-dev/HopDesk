@@ -2,8 +2,8 @@
 # A macOS build: a .dmg per architecture, signed and notarised when credentials
 # are present.
 #
-# This has never been run — no Mac has built HopDesk yet. Treat a first run as
-# an experiment, not a release.
+# The release workflow runs this on GitHub's Mac runners, once per
+# architecture: HOPDESK_MAC_ARCH=arm64 or x64 (default: this Mac's own).
 #
 # What Apple requires, and what it costs if it is missing:
 #
@@ -26,7 +26,18 @@ if [[ "$(uname -s)" != "Darwin" ]]; then
   exit 2
 fi
 
+ARCH="${HOPDESK_MAC_ARCH:-$(uname -m | sed 's/x86_64/x64/')}"
+
 npm ci
+# koffi's native module comes as one package per architecture, and npm installs
+# only this machine's. An Intel build made on Apple Silicon (or the reverse)
+# needs the other one, or input injection is missing from it.
+if [[ "$ARCH" != "$(uname -m | sed 's/x86_64/x64/')" ]]; then
+  KOFFI_VERSION=$(node -p "require('koffi/package.json').version")
+  npm install --no-save --force "@koromix/koffi-darwin-${ARCH}@${KOFFI_VERSION}"
+fi
+test -f "node_modules/@koromix/koffi-darwin-${ARCH}/darwin_${ARCH}/koffi.node" \
+  || { echo "koffi's native module for darwin-${ARCH} is missing" >&2; exit 1; }
 npm run build
 unset ELECTRON_RUN_AS_NODE
 
@@ -41,16 +52,19 @@ if security find-identity -v -p codesigning 2>/dev/null | grep -q "Developer ID 
     echo "Set APPLE_ID, APPLE_APP_SPECIFIC_PASSWORD and APPLE_TEAM_ID to notarise." >&2
   fi
 else
-  echo "No Developer ID certificate found: building unsigned, for local testing only." >&2
-  extra+=(--config.mac.identity=null)
+  # Not "unsigned": Apple Silicon refuses to run a bundle with no valid
+  # signature at all ("damaged"), so it is signed ad hoc — valid, but vouched
+  # for by nobody, which is what Gatekeeper's "Open Anyway" is for.
+  echo "No Developer ID certificate found: signing ad hoc (Gatekeeper will ask before first launch)." >&2
+  extra+=(--config.mac.identity=-)
 fi
 
-npx --yes "electron-builder@${ELECTRON_BUILDER_VERSION}" \
-  --mac --config packaging/electron-builder.yml "${extra[@]}"
+npx --yes "electron-builder@${ELECTRON_BUILDER_VERSION}" --publish never \
+  --mac dmg "--${ARCH}" --config packaging/electron-builder.yml "${extra[@]}"
 
 echo
 echo "Packages are in dist-packages/. Before calling this done, on the Mac:"
 echo "  1. open the .dmg and drag HopDesk to Applications"
-echo "  2. start it, allow Screen Recording and Accessibility when asked"
-echo "  3. node scripts/verify-macos.mjs   (from a checkout, to check input injection)"
-echo "  4. connect to it from another computer and check the screen and the keyboard"
+echo "  2. start it: 'This computer' lists Screen Recording and Accessibility, and"
+echo "     opens the right pane of System Settings for whichever is not allowed"
+echo "  3. connect to it from another computer and check the screen and the keyboard"
