@@ -84,6 +84,7 @@ function startXev() {
 
 test('keys and buttons injected by the host arrive in a real application', { skip, timeout: 60_000 }, async () => {
   const xev = startXev();
+  const { XOpenDisplay, XCloseDisplay, XSetInputFocus, XSync } = focusApi();
   const dpy = XOpenDisplay(display);
   const input = new X11Input({ display });
   try {
