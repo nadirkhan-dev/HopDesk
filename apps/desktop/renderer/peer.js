@@ -102,21 +102,39 @@ export function createPeerSession({ role, sessionId, bridge, iceServers = [], ge
 
   function wireChannel(channel) {
     channels.set(channel.label, channel);
+    let unreadable = 0;
+    channel.onopen = () => log(`${channel.label} channel open`);
     channel.onmessage = ev => {
       if (!onChannelMessage) return;
+      let message;
       try {
-        onChannelMessage(channel.label, JSON.parse(ev.data));
+        message = JSON.parse(ev.data);
       } catch {
-        // A channel sending anything but JSON is not one of ours.
+        // A channel sending anything but JSON is not one of ours. Said once, not per message.
+        if (unreadable++ === 0) log(`${channel.label} channel: ignoring a message that is not JSON`);
+        return;
       }
+      onChannelMessage(channel.label, message);
     };
-    channel.onclose = () => channels.delete(channel.label);
+    channel.onclose = () => {
+      // Only if it is still this channel: a later one under the same label must survive.
+      if (channels.get(channel.label) === channel) channels.delete(channel.label);
+      log(`${channel.label} channel closed`);
+    };
   }
 
-  /** Sends one JSON message on a channel, if it is open. */
+  /**
+   * Sends one JSON message on a channel. Returns null when it was sent, or why
+   * it was not — which the caller counts, because a message dropped here is
+   * otherwise dropped without a trace.
+   */
   function send(label, message) {
+    if (closed) return 'the session is closed';
     const channel = channels.get(label);
-    if (channel && channel.readyState === 'open') channel.send(JSON.stringify(message));
+    if (!channel) return `no ${label} channel`;
+    if (channel.readyState !== 'open') return `${label} channel ${channel.readyState}`;
+    channel.send(JSON.stringify(message));
+    return null;
   }
 
   async function createOffer(arg) {

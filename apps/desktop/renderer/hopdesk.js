@@ -19,6 +19,7 @@ export function initHopdesk({ api, toast, confirmDialog }) {
     session: null,
     video: null,
     peer: null,
+    stats: null,
     clipboardSeq: 0,
     lastClipboardSent: '',
   };
@@ -338,7 +339,8 @@ export function initHopdesk({ api, toast, confirmDialog }) {
   const sendClipboard = text => {
     if (!ui.peer || text === ui.lastClipboardSent) return;
     ui.lastClipboardSent = text;
-    ui.peer.send('clipboard', { type: 'clipboard', seq: ++ui.clipboardSeq, text });
+    const dropped = ui.peer.send('clipboard', { type: 'clipboard', seq: ++ui.clipboardSeq, text });
+    if (dropped) api.viewerLog?.(`clipboard not sent: ${dropped}`);
   };
 
   /* The peer connection for a viewer session, created when the main process
@@ -362,16 +364,72 @@ export function initHopdesk({ api, toast, confirmDialog }) {
           ui.lastClipboardSent = message.text;
           void api.viewerClipboardWrite(message.text);
         },
-        log: () => {},
+        log: text => api.viewerLog?.(`session ${sessionId}: ${text}`),
       });
+      /* A new session replaces the last one. Input reads ui.peer at the moment
+         it sends, so it always reaches the session on screen now — never a
+         closed one from before (which is how every session after the first in
+         an app run used to get video but no mouse or keyboard). */
+      ui.stats?.flush('replaced by a new session');
       ui.peer = peer;
-      wireInput(video, peer);
+      ui.stats = inputStats(sessionId);
+      const close = peer.close;
+      peer.close = () => {
+        if (ui.peer === peer) {
+          ui.stats?.flush('session closed');
+          ui.peer = null;
+          ui.stats = null;
+        }
+        close();
+      };
+      wireInput(video);
       return peer;
     },
   });
 
+  /**
+   * What happened to this session's input: how much was sent, and how much was
+   * dropped and why. Counts only — never which keys, since keystrokes can be
+   * passwords. Logged when the first message goes out, at most every five
+   * seconds while it changes, and when the session ends.
+   */
+  function inputStats(sessionId) {
+    const sent = {};
+    const dropped = {};
+    // The first summary waits a full interval; the first send has its own line.
+    let lastLog = Date.now();
+    const total = counts => Object.values(counts).reduce((a, b) => a + b, 0);
+    const describe = counts => Object.entries(counts).map(([k, n]) => `${k} ${n}`).join(', ') || 'none';
+    const report = why => {
+      api.viewerLog?.(`session ${sessionId} input${why ? ` (${why})` : ''}: sent ${total(sent)} [${describe(sent)}]; `
+        + `dropped ${total(dropped)} [${describe(dropped)}]`);
+      lastLog = Date.now();
+    };
+    return {
+      record(type, reason) {
+        if (reason) {
+          if (!dropped[reason]) api.viewerLog?.(`session ${sessionId}: input not sent: ${reason}`);
+          dropped[reason] = (dropped[reason] ?? 0) + 1;
+        } else {
+          if (!total(sent)) api.viewerLog?.(`session ${sessionId}: first input sent`);
+          sent[type] = (sent[type] ?? 0) + 1;
+        }
+        if (Date.now() - lastLog >= 5000) report('');
+      },
+      // Always, so every session's log ends with what became of its input.
+      flush(why) { report(why); },
+    };
+  }
+
+  /** Sends one input message to the session currently on screen, and counts it. */
+  function sendInput(message) {
+    const reason = ui.peer ? ui.peer.send('input', message) : 'no session';
+    if (ui.stats) ui.stats.record(message.type, reason);
+    else if (reason) api.viewerLog?.(`input not sent: ${reason}`);
+  }
+
   /** Mouse, keyboard and scrolling from the video element to the host. */
-  function wireInput(video, peer) {
+  function wireInput(video) {
     if (video.dataset.wired === 'yes') return;
     video.dataset.wired = 'yes';
 
@@ -384,7 +442,7 @@ export function initHopdesk({ api, toast, confirmDialog }) {
     };
     const pointer = (e, buttons) => {
       const { x, y } = position(e);
-      peer.send('input', { type: 'pointer', x, y, buttons: buttons ?? e.buttons });
+      sendInput({ type: 'pointer', x, y, buttons: buttons ?? e.buttons });
     };
 
     video.addEventListener('mousemove', e => pointer(e));
@@ -395,19 +453,19 @@ export function initHopdesk({ api, toast, confirmDialog }) {
     video.addEventListener('wheel', e => {
       e.preventDefault();
       // Pixels to wheel clicks, the unit the host injects.
-      peer.send('input', { type: 'wheel', dx: e.deltaX / 100, dy: e.deltaY / 100 });
+      sendInput({ type: 'wheel', dx: e.deltaX / 100, dy: e.deltaY / 100 });
     }, { passive: false });
 
     const send = (e, down) => {
       // HopDesk's own shortcut for leaving a fullscreen session stays local.
       if (down && e.ctrlKey && e.altKey && e.key === 'Enter') { $('#hd-fullscreen').click(); return; }
       e.preventDefault();
-      peer.send('input', { type: 'key', code: e.code, key: e.key.length <= 8 ? e.key : '', down });
+      sendInput({ type: 'key', code: e.code, key: e.key.length <= 8 ? e.key : '', down });
     };
     video.addEventListener('keydown', e => send(e, true));
     video.addEventListener('keyup', e => send(e, false));
     // Keys held when focus leaves would stay down on the other computer.
-    video.addEventListener('blur', () => peer.send('input', { type: 'release-all' }));
+    video.addEventListener('blur', () => { if (ui.peer) sendInput({ type: 'release-all' }); });
     video.addEventListener('focus', async () => {
       const text = await api.viewerClipboardRead();
       if (text) sendClipboard(text);

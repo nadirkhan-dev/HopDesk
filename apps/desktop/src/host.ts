@@ -6,6 +6,7 @@ import {
 import { LanListener, HopdeskAnnouncer, negotiateAsHost } from '@hopdesk/transport';
 import { generateAccessCode, fromBase64, bytesToBigInt } from '@hopdesk/crypto';
 import type { InputController } from '@hopdesk/platform';
+import { InputStats } from './input-stats.js';
 import { keysymFor } from './keysym.js';
 import type { RemoteAccessSettings } from '@hopdesk/core';
 import type { LocalIdentity } from './identity.js';
@@ -60,6 +61,8 @@ export interface HostDependencies {
   createPeer: (sessionId: string, iceServers: unknown[]) => Promise<{ peer: RtcPeerHandle; close: () => void }>;
   /** The platform's input injector, or null when input cannot be injected. */
   input: () => InputController | null;
+  /** Why input cannot be injected right now, for the log; null when it can. */
+  inputProblem?: () => string | null;
   /**
    * Whether a device may connect because it is on the same HopDesk account.
    * Absent when this computer is not signed in, which refuses account
@@ -79,6 +82,7 @@ interface RunningSession {
   peer: { peer: RtcPeerHandle; close: () => void } | null;
   info: HostSessionInfo;
   clipboardSeq: number;
+  input: InputStats;
 }
 
 export class HostRole extends EventEmitter {
@@ -194,6 +198,7 @@ export class HostRole extends EventEmitter {
     const running = this.sessions.get(id);
     if (!running) return;
     this.sessions.delete(id);
+    running.input.finish();
     /* Ending a session here is a decision by the person at this computer, so the
        viewer's resume grant goes with it: reconnecting must ask again. */
     this.grants.revokeViewer(running.session.viewer.viewerKey);
@@ -240,7 +245,10 @@ export class HostRole extends EventEmitter {
       since: Date.now(),
       state: 'connecting',
     };
-    const running: RunningSession = { session, peer: null, info, clipboardSeq: 0 };
+    const running: RunningSession = {
+      session, peer: null, info, clipboardSeq: 0,
+      input: new InputStats(session.sessionId, line => this.deps.log.info(line)),
+    };
     this.sessions.set(session.sessionId, running);
     this.emit('change');
     this.deps.log.info(`session ${session.sessionId} authorised for ${info.viewerId} (${session.viewer.auth})`);
@@ -248,6 +256,7 @@ export class HostRole extends EventEmitter {
     session.control.onClose(() => {
       if (this.sessions.has(session.sessionId)) {
         this.sessions.delete(session.sessionId);
+        running.input.finish();
         running.peer?.peer.dispose();
         running.peer?.close();
         this.deps.input()?.releaseAll();
@@ -287,39 +296,65 @@ export class HostRole extends EventEmitter {
    */
   handleInput(sessionId: string, raw: unknown) {
     const running = this.sessions.get(sessionId);
-    if (!running) return;
-    const input = this.deps.input();
-    if (!input) return;
+    if (!running) {
+      this.noteStrayInput(sessionId);
+      return;
+    }
+    const stats = running.input;
+    const type = typeof (raw as { type?: unknown })?.type === 'string' ? String((raw as { type: string }).type).slice(0, 20) : 'unknown';
+    stats.arrived(type);
+
     let message;
     try {
       message = inputMessage(raw, '');
     } catch (err) {
-      this.deps.log.warn(`session ${sessionId} sent an invalid input message: ${(err as Error).message}`);
+      stats.drop(`invalid message (${(err as Error).message.slice(0, 80)})`);
       return;
     }
-    const { width, height } = this.deps.displaySize();
-    switch (message.type) {
-      case 'pointer': {
-        input.movePointer(message.x * (width - 1), message.y * (height - 1));
-        const buttons = message.buttons;
-        for (const button of [1, 2, 3] as const) {
-          const bit = button === 1 ? 1 : button === 2 ? 4 : 2;      // DOM buttons: 1 left, 2 right, 4 middle
-          input.button(button, (buttons & bit) !== 0);
-        }
-        return;
-      }
-      case 'wheel':
-        input.wheel(message.dx, message.dy);
-        return;
-      case 'key': {
-        const keysym = keysymForMessage(message);
-        if (keysym !== null) input.key(keysym, message.down);
-        return;
-      }
-      case 'release-all':
-        input.releaseAll();
-        return;
+    const input = this.deps.input();
+    if (!input) {
+      stats.drop(`no input controller: ${this.deps.inputProblem?.() ?? 'unavailable'}`);
+      return;
     }
+    try {
+      const { width, height } = this.deps.displaySize();
+      switch (message.type) {
+        case 'pointer': {
+          input.movePointer(message.x * (width - 1), message.y * (height - 1));
+          const buttons = message.buttons;
+          for (const button of [1, 2, 3] as const) {
+            const bit = button === 1 ? 1 : button === 2 ? 4 : 2;      // DOM buttons: 1 left, 2 right, 4 middle
+            input.button(button, (buttons & bit) !== 0);
+          }
+          break;
+        }
+        case 'wheel':
+          input.wheel(message.dx, message.dy);
+          break;
+        case 'key': {
+          const keysym = keysymForMessage(message);
+          if (keysym === null) { stats.drop('a key with no keysym on this computer'); return; }
+          input.key(keysym, message.down);
+          break;
+        }
+        case 'release-all':
+          input.releaseAll();
+          break;
+      }
+      stats.delivered();
+    } catch (err) {
+      // Thrown inside an IPC listener, this would reach stderr and never the log.
+      stats.drop(`injection failed: ${(err as Error).message.slice(0, 120)}`);
+    }
+  }
+
+  private readonly strayInput = new Set<string>();
+
+  /** Input for a session that is not running: said once per session id. */
+  private noteStrayInput(sessionId: string) {
+    if (this.strayInput.has(sessionId) || this.strayInput.size > 100) return;
+    this.strayInput.add(sessionId);
+    this.deps.log.warn(`input dropped: session ${sessionId} is not running on this host`);
   }
 
   /** Clipboard text a viewer copied, to put on this computer's clipboard. */

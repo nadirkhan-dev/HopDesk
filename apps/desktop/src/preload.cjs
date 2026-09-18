@@ -79,6 +79,7 @@ contextBridge.exposeInMainWorld('hopdesk', {
   sendToHost: (label, message) => ipcRenderer.send('viewerSend', { label, message }),
   viewerClipboardRead: () => ipcRenderer.invoke('viewerClipboardRead'),
   viewerClipboardWrite: text => ipcRenderer.invoke('viewerClipboardWrite', text),
+  viewerLog: text => ipcRenderer.send('viewer:log', text),
   onDeviceSession: handler => {
     ipcRenderer.on('deviceSession', (_event, payload) => handler(payload));
   },

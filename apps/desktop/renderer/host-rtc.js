@@ -17,7 +17,13 @@ async function screenStream() {
   /* Plain `video: true`: the main process chooses the screen, and Chromium
      rejects constraint objects on this path ("Invalid capture constraints").
      The frame rate is applied to the track afterwards instead. */
-  capture = await navigator.mediaDevices.getDisplayMedia({ video: true, audio: false });
+  try {
+    capture = await navigator.mediaDevices.getDisplayMedia({ video: true, audio: false });
+  } catch (err) {
+    // Chromium's own words ("Invalid capture constraints") say nothing useful.
+    bridge.hostLog(`screen capture refused: ${err?.message ?? err}`);
+    throw new Error('this computer has no screen HopDesk can share');
+  }
   for (const track of capture.getVideoTracks()) {
     try { await track.applyConstraints({ frameRate: { ideal: 30, max: 60 } }); } catch { /* the default rate is fine */ }
   }

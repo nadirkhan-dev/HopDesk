@@ -327,6 +327,7 @@ function createRoles(identity: LocalIdentity) {
       return { peer, close: () => closeHostWindowIfIdle() };
     },
     input: hostInput,
+    inputProblem: () => inputUnavailable ?? (preparingInput ? 'input is still being set up' : null),
     // Only a signed-in computer can authorise an account connection.
     accountAuthorised: (viewerId, viewerKey) => account?.authorises(viewerId, viewerKey) ?? false,
     iceServers: () => account?.iceServers() ?? Promise.resolve([]),
@@ -432,14 +433,25 @@ app.whenReady().then(async () => {
       callback({});
       return;
     }
+    /* The callback may be called once. Refusing with {} throws when video was
+       requested, and that throw used to reach the catch below, which called it
+       a second time — an unhandled rejection, and a viewer told only "Invalid
+       capture constraints". */
+    let answered = false;
+    const answer = (streams: Parameters<typeof callback>[0]) => {
+      if (answered) return;
+      answered = true;
+      try { callback(streams); } catch { /* a refusal: getDisplayMedia rejects in the capture window */ }
+    };
     void desktopCapturer.getSources({ types: ['screen'], fetchWindowIcons: false }).then(sources => {
       const display = screen.getPrimaryDisplay();
       const chosen = sources.find(s => s.display_id === String(display.id)) ?? sources[0];
       log.info(`screen sources: ${sources.map(s => `${s.name}/${s.display_id}`).join(', ') || 'none'}`);
-      callback(chosen ? { video: chosen } : {});
+      if (!chosen) log.error('no screen to share: the system reported no screens HopDesk can capture');
+      answer(chosen ? { video: chosen } : {});
     }).catch(err => {
       log.error(`screen capture unavailable: ${(err as Error).message}`);
-      callback({});
+      answer({});
     });
   }, { useSystemPicker: false });
 
@@ -1043,8 +1055,13 @@ function fromHostWindow(e: IpcMainEvent) {
   return isTrustedFrom(e, [{ contents: hostWindow && !hostWindow.isDestroyed() ? hostWindow.webContents : null, url: HOST_URL }]);
 }
 
+let untrustedInput = 0;
 ipcMain.on('host:input', (e, payload: { sessionId?: unknown; message?: unknown }) => {
-  if (!fromHostWindow(e) || typeof payload?.sessionId !== 'string') return;
+  if (!fromHostWindow(e) || typeof payload?.sessionId !== 'string') {
+    // Said once: input that never reaches the host must not vanish without a trace.
+    if (untrustedInput++ === 0) log.warn(`input ignored: it came from ${e.senderFrame?.url ?? 'an unknown window'}, not the capture window`);
+    return;
+  }
   host?.handleInput(payload.sessionId, payload.message);
 });
 
@@ -1063,6 +1080,14 @@ ipcMain.on('host:display', (e, payload: { sessionId?: unknown; message?: unknown
 ipcMain.on('host:log', (e, text: unknown) => {
   if (!fromHostWindow(e) || typeof text !== 'string') return;
   log.info(`capture window: ${text.slice(0, 200)}`);
+});
+
+/* The viewer's side of a session: its channels and what became of its input.
+   The renderer sends counts and states only, never what was typed. */
+ipcMain.on('viewer:log', (e, text: unknown) => {
+  if (!isTrustedFrom(e, [{ contents: window && !window.isDestroyed() ? window.webContents : null, url: UI_URL }])) return;
+  if (typeof text !== 'string') return;
+  log.info(`viewer: ${text.slice(0, 300)}`);
 });
 
 /* ---------------------------------------- connecting to another computer */

@@ -86,6 +86,38 @@ async function connect(viewer, { deviceId, code, address = '127.0.0.1' }) {
 
 const allow = host => host.eval(`document.querySelector('#consent-allow').click(); return true`);
 
+/**
+ * Proves input reaches the host now: parks the host's real pointer in a corner,
+ * moves the viewer's mouse to a fraction of the video, and waits for the host
+ * pointer to arrive near the same fraction of its screen. Seeing video is not
+ * enough — a session once showed the screen while every input went nowhere.
+ */
+async function pointerReachesHost(viewer, fraction, what) {
+  const box = await viewer.eval(`
+    const r = document.querySelector('#hd-video').getBoundingClientRect();
+    return { left: r.left, top: r.top, width: r.width, height: r.height }`);
+  const probe = new X11Input({ display: hostDisplay });
+  try {
+    probe.movePointer(1, 1);
+    await viewer.cdp.send('Input.dispatchMouseEvent', {
+      type: 'mouseMoved', x: box.left + box.width * fraction, y: box.top + box.height * fraction,
+    });
+    return await waitFor(() => {
+      const p = probe.pointerPosition();
+      const near = (v, size) => Math.abs(v / size - fraction) < 0.2;
+      return near(p.x, probe.width) && near(p.y, probe.height) ? p : null;
+    }, 15_000, `the host pointer to follow the viewer (${what})`);
+  } finally {
+    probe.close();
+  }
+}
+
+/** The host's log, where input counters are written. */
+async function hostLog(app) {
+  const { readFile } = await import('node:fs/promises');
+  return readFile(path.join(app.dataDir, 'hopdesk', 'hopdesk.log'), 'utf8');
+}
+
 test('a viewer connects to a host by Device ID and access code, sees its screen and controls it',
   { skip, timeout: 180_000 }, async () => {
   const host = await startHost();
@@ -278,8 +310,70 @@ test('an unexpected network drop resumes the session without asking the host aga
       'the host was asked to allow the same viewer twice');
     const sessions = await host.eval(`return document.querySelectorAll('#mine-sessions .session-row').length`);
     assert.equal(sessions, 1, 'the resumed session is not the only one');
+
+    /* And it is a working session, not just a picture: input reaches the host. */
+    await viewer.waitFor(`const v = document.querySelector('#hd-video'); return v.videoWidth > 0 && v.readyState >= 2`,
+      45_000, 'video after resuming');
+    await pointerReachesHost(viewer, 0.5, 'after resuming');
   } finally {
     proxy.close();
+    await viewer.close();
+    await host.close();
+  }
+});
+
+test('a second session in the same viewer gets input too, and both sides log what became of it',
+  { skip, timeout: 240_000 }, async () => {
+  /* The bug this pins down: input was wired to the first session's connection
+     only, so every later session in the same app run showed the host's screen
+     while the mouse and keyboard went nowhere — and nothing said so. */
+  const host = await startHost();
+  const viewer = await startViewer();
+  const xev = startXev(hostDisplay);
+  try {
+    for (const round of [1, 2]) {
+      await connect(viewer, host);
+      await host.waitFor(`return document.querySelector('#dlg-consent')?.open === true`, 25_000, `the Allow prompt (session ${round})`);
+      await allow(host);
+      await viewer.waitFor(`const v = document.querySelector('#hd-video'); return v.videoWidth > 0 && v.readyState >= 2`,
+        45_000, `video (session ${round})`);
+      await pointerReachesHost(viewer, round === 1 ? 0.4 : 0.6, `session ${round}`);
+      if (round === 1) {
+        await viewer.eval(`document.querySelector('#hd-disconnect').click(); return true`);
+        await viewer.waitFor(`return document.querySelector('#hd-view')?.hidden === true`, 15_000, 'the first session to close');
+        await host.waitFor(`return document.querySelectorAll('#mine-sessions .session-row').length === 0`, 15_000, 'the host to end the first session');
+      }
+    }
+
+    /* The keyboard as well as the mouse, in the second session. */
+    const window = await xev.window();
+    focusWindow(hostDisplay, window);
+    await viewer.eval(`document.querySelector('#hd-video').focus(); return true`);
+    await viewer.cdp.send('Input.dispatchKeyEvent', { type: 'keyDown', key: 'b', code: 'KeyB', text: 'b', windowsVirtualKeyCode: 66 });
+    await viewer.cdp.send('Input.dispatchKeyEvent', { type: 'keyUp', key: 'b', code: 'KeyB', windowsVirtualKeyCode: 66 });
+    await xev.waitFor(/keysym 0x62, b/, 'the letter b on the host, in the second session');
+
+    /* Both logs account for the input, for both sessions — so the next time
+       input seems to vanish, the log says where. */
+    await viewer.eval(`document.querySelector('#hd-disconnect').click(); return true`);
+    await host.waitFor(`return document.querySelectorAll('#mine-sessions .session-row').length === 0`, 15_000, 'the host to end the second session');
+    const hostLines = await waitFor(async () => {
+      const text = await hostLog(host);
+      const ends = text.match(/input \(session ended\): received \d+ .*; injected (\d+); dropped/g) ?? [];
+      return ends.length >= 2 ? text : null;
+    }, 10_000, 'an input summary for each session in the host log');
+    assert.equal((hostLines.match(/first input arrived from the viewer/g) ?? []).length, 2,
+      'the host log does not say input arrived in both sessions');
+    for (const line of hostLines.match(/input \(session ended\).*/g)) {
+      assert.match(line, /injected [1-9]\d*;/, `a session ended with nothing injected: ${line}`);
+    }
+    const viewerLines = await hostLog(viewer);
+    assert.equal((viewerLines.match(/viewer: session \S+: first input sent/g) ?? []).length, 2,
+      'the viewer log does not say input was sent in both sessions');
+    /* Nothing about what was typed: counts, not keys. */
+    assert.doesNotMatch(hostLines + viewerLines, /KeyB|"b"|keysym/, 'a log names the keys that were pressed');
+  } finally {
+    xev.child.kill('SIGKILL');
     await viewer.close();
     await host.close();
   }
