@@ -112,7 +112,7 @@ jobs:
           echo "HOPDESK_MAC_APP=$APP" >> "$GITHUB_ENV"
           want=$([ "${{ matrix.arch }}" = x64 ] && echo x86_64 || echo arm64)
           lipo -archs "$APP/Contents/MacOS/HopDesk" | tee /dev/stderr | grep -qw "$want"
-          KOFFI=$(find "$APP" -path "*koffi-darwin-${{ matrix.arch }}*" -name koffi.node | head -1)
+          KOFFI=$(find "$APP/Contents/Resources" -name koffi.node -path "*darwin_${{ matrix.arch }}*" | head -1)
           test -n "$KOFFI" || { echo "koffi's darwin-${{ matrix.arch }} module is not in the bundle" >&2; exit 1; }
           lipo -archs "$KOFFI" | tee /dev/stderr | grep -qw "$want"
           # A valid signature, ad hoc: without one Apple Silicon calls the app damaged.

@@ -33,7 +33,8 @@ npm ci
 # only this machine's. An Intel build made on Apple Silicon (or the reverse)
 # needs the other one, or input injection is missing from it.
 if [[ "$ARCH" != "$(uname -m | sed 's/x86_64/x64/')" ]]; then
-  KOFFI_VERSION=$(node -p "require('koffi/package.json').version")
+  # Read from the file: koffi's "exports" does not include its package.json.
+  KOFFI_VERSION=$(node -p "JSON.parse(require('fs').readFileSync('node_modules/koffi/package.json', 'utf8')).version")
   npm install --no-save --force "@koromix/koffi-darwin-${ARCH}@${KOFFI_VERSION}"
 fi
 test -f "node_modules/@koromix/koffi-darwin-${ARCH}/darwin_${ARCH}/koffi.node" \
@@ -42,6 +43,7 @@ npm run build
 unset ELECTRON_RUN_AS_NODE
 
 extra=()
+adhoc=false
 if security find-identity -v -p codesigning 2>/dev/null | grep -q "Developer ID Application"; then
   echo "Signing with the Developer ID certificate in your keychain."
   if [[ -n "${APPLE_ID:-}" && -n "${APPLE_APP_SPECIFIC_PASSWORD:-}" && -n "${APPLE_TEAM_ID:-}" ]]; then
@@ -55,12 +57,44 @@ else
   # Not "unsigned": Apple Silicon refuses to run a bundle with no valid
   # signature at all ("damaged"), so it is signed ad hoc — valid, but vouched
   # for by nobody, which is what Gatekeeper's "Open Anyway" is for.
+  # electron-builder cannot do this itself (it takes "-" for a certificate name
+  # and skips signing), so it builds the app unsigned and it is signed here.
   echo "No Developer ID certificate found: signing ad hoc (Gatekeeper will ask before first launch)." >&2
-  extra+=(--config.mac.identity=-)
+  extra+=(--config.mac.identity=null)
+  adhoc=true
 fi
 
-npx --yes "electron-builder@${ELECTRON_BUILDER_VERSION}" --publish never \
-  --mac dmg "--${ARCH}" --config packaging/electron-builder.yml "${extra[@]}"
+builder() {
+  npx --yes "electron-builder@${ELECTRON_BUILDER_VERSION}" --publish never \
+    --config packaging/electron-builder.yml "--${ARCH}" "${extra[@]}" "$@"
+}
+
+# 1. The app itself.
+builder --mac dir
+APP=$(find dist-packages -maxdepth 2 -name HopDesk.app -path "*mac*" | head -1)
+[[ -n "$APP" ]] || { echo "electron-builder produced no HopDesk.app" >&2; exit 1; }
+echo "Built $APP"
+
+# koffi's module must be in the bundle, outside the asar archive, for this architecture.
+KOFFI_NODE=$(find "$APP/Contents/Resources" -name koffi.node -path "*darwin_${ARCH}*" | head -1)
+if [[ -z "$KOFFI_NODE" ]]; then
+  echo "koffi's darwin_${ARCH} module is not in the bundle. What is there:" >&2
+  find "$APP/Contents/Resources" -maxdepth 4 \( -name "*koffi*" -o -name "app.asar*" \) >&2 || true
+  find "$APP/Contents/Resources" -name "*.node" >&2 || true
+  npx --yes @electron/asar list "$APP/Contents/Resources/app.asar" 2>/dev/null | grep -i koffi | head -20 >&2 || true
+  exit 1
+fi
+echo "koffi: $KOFFI_NODE"
+
+# 2. Ad hoc signature, with the same entitlements a Developer ID build gets.
+if $adhoc; then
+  codesign --force --deep --sign - --options runtime \
+    --entitlements packaging/entitlements.mac.plist "$APP"
+  codesign --verify --deep --strict --verbose=2 "$APP"
+fi
+
+# 3. The .dmg, from the app as it now is.
+builder --mac dmg --prepackaged "$APP"
 
 echo
 echo "Packages are in dist-packages/. Before calling this done, on the Mac:"
