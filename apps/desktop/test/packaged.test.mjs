@@ -45,6 +45,18 @@ test('two packaged HopDesk applications connect to each other and one controls t
   const host = await launchApp({ binary: appImage, env: { ...ENV, DISPLAY: hostDisplay } });
   const viewer = await launchApp({ binary: appImage, env: { ...ENV, DISPLAY: viewerDisplay } });
   try {
+    /* Prove the packaged build is what is running, not the development one.
+       This test passed for a while against the development build because the
+       helper quietly ignored which binary it was asked for — a packaging test
+       that tests no package is worse than no test at all. An AppImage serves
+       its files from the mount point it creates. */
+    for (const [name, app] of [['host', host], ['viewer', viewer]]) {
+      const href = await app.eval('return location.href');
+      assert.match(href, /^file:\/\/\/tmp\/\.mount_/,
+        `the ${name} is not running from the AppImage: ${href}`);
+      assert.ok(href.includes('app.asar'), `the ${name} is not running from the bundle: ${href}`);
+    }
+
     /* The bundle has to carry the crypto: without it there is no Device ID. */
     await host.eval(`document.querySelector('#mine-toggle').click(); return true`);
     await host.waitFor(`return document.querySelector('#mine-state')?.textContent === 'Online'`, 25_000, 'the packaged host to come online');
