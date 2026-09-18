@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { existsSync } from 'node:fs';
+import { existsSync, readFileSync } from 'node:fs';
 import path from 'node:path';
 import { launchApp, electronUnavailableReason, waitFor, desktopDir } from './helpers/electron.mjs';
 import { X11Input, X11Unavailable } from '@hopdesk/platform';
@@ -16,7 +16,10 @@ import { X11Input, X11Unavailable } from '@hopdesk/platform';
  * Build it first: packaging/build-appimage.sh
  */
 
-const appImage = path.join(desktopDir, '../../dist-packages/HopDesk-0.1.0.AppImage');
+// The AppImage of this version, by name: matching any AppImage would let a stale
+// build from an earlier version stand in for the one under test.
+const { version } = JSON.parse(readFileSync(path.join(desktopDir, '../../package.json'), 'utf8'));
+const appImage = path.join(desktopDir, `../../dist-packages/HopDesk-${version}.AppImage`);
 const hostDisplay = process.env.HOPDESK_HOST_DISPLAY ?? ':31';
 const viewerDisplay = process.env.HOPDESK_VIEWER_DISPLAY ?? ':32';
 
