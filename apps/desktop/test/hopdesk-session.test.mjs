@@ -329,7 +329,12 @@ async function readClipboard(display) {
   const electronBinary = createRequire(import.meta.url)('electron');
   const env = launchEnvironment({ ...process.env, DISPLAY: display });
   delete env.ELECTRON_RUN_AS_NODE;
-  const child = spawn(electronBinary, [script, ...ozoneArgs(env)], { env, stdio: ['ignore', 'pipe', 'pipe'] });
+  /* Same sandbox rule as launchApp: on a CI runner the setuid helper cannot be
+     configured, and Electron refuses to start at all without the switch — which
+     showed up here as "the clipboard never arrived" rather than as a crash. */
+  const sandbox = env.CI ? ['--no-sandbox'] : [];
+  const child = spawn(electronBinary, [script, ...sandbox, ...ozoneArgs(env)],
+    { env, stdio: ['ignore', 'pipe', 'pipe'] });
   let out = '';
   child.stdout.on('data', d => { out += d; });
   await new Promise(resolve => child.on('exit', resolve));
