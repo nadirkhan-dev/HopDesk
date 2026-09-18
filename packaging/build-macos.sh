@@ -71,8 +71,8 @@ builder() {
 
 # 1. The app itself.
 builder --mac dir
-APP=$(find dist-packages -maxdepth 2 -name HopDesk.app -path "*mac*" | head -1)
-[[ -n "$APP" ]] || { echo "electron-builder produced no HopDesk.app" >&2; exit 1; }
+APP=$(find dist-packages -maxdepth 2 -name "*.app" -path "dist-packages/mac*" | head -1)
+[[ -n "$APP" ]] || { echo "electron-builder produced no .app:" >&2; find dist-packages -maxdepth 2 >&2; exit 1; }
 echo "Built $APP"
 
 # koffi's module must be in the bundle, outside the asar archive, for this architecture.
