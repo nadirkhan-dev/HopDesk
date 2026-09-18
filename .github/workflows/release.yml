@@ -1,0 +1,121 @@
+# Publishes installable Linux packages to GitHub Releases.
+#
+# This builds the same AppImage and .deb that CI builds, runs the same test
+# against them — two packaged copies started and connected to each other — and
+# only then attaches them to a release. A package nobody started is a package
+# nobody tested, so the test is not optional here: if it fails, nothing is
+# published.
+#
+# macOS and Windows are deliberately absent. HopDesk has no Host backend for
+# Windows at all, and the macOS backend has not yet been verified on real
+# hardware. Shipping an installer for either would imply something untrue.
+
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Tag for the release, e.g. v0.1.0 (created if it does not exist)"
+        required: true
+        type: string
+
+permissions:
+  contents: write
+
+jobs:
+  linux:
+    name: Linux packages
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update
+          # libfuse2t64: needed to mount the AppImage in order to test it.
+          # tigervnc-standalone-server: the X displays the packaged app runs against.
+          sudo apt-get install -y --no-install-recommends \
+            libxtst6 libnss3 libasound2t64 libgtk-3-0t64 libfuse2t64 \
+            tigervnc-standalone-server
+
+      - name: Build the AppImage and the .deb
+        env:
+          # Debian packages must name a homepage, and build-appimage.sh builds
+          # the .deb only when one is supplied.
+          HOPDESK_HOMEPAGE: https://github.com/${{ github.repository }}
+        run: bash packaging/build-appimage.sh
+
+      - name: Start the packaged app and connect two of them
+        run: |
+          scripts/test-displays.sh
+          # HOPDESK_REQUIRE_PACKAGE=1 turns "no package to test" into a failure
+          # rather than a silent pass, and the test asserts it is driving the
+          # AppImage rather than the development build.
+          DISPLAY=:31 HOPDESK_REQUIRE_PACKAGE=1 HOPDESK_HOST_DISPLAY=:31 HOPDESK_VIEWER_DISPLAY=:32 \
+            node --test --test-timeout=300000 apps/desktop/test/packaged.test.mjs
+
+      - name: Checksums
+        working-directory: dist-packages
+        run: sha256sum *.AppImage *.deb | tee SHA256SUMS.txt
+
+      - name: Publish the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ inputs.tag || github.ref_name }}
+        run: |
+          set -euo pipefail
+          cat > /tmp/notes.md <<'NOTES'
+          ## Install
+
+          **Debian, Ubuntu, Mint, Pop!_OS** — download the `.deb` and:
+
+              sudo apt install ./hopdesk_*_amd64.deb
+              hopdesk
+
+          **Any other Linux** — download the `.AppImage` and:
+
+              chmod +x HopDesk-*.AppImage
+              ./HopDesk-*.AppImage
+
+          If it complains about FUSE, either install `libfuse2` or run it with
+          `--appimage-extract-and-run`.
+
+          Verify a download against `SHA256SUMS.txt`:
+
+              sha256sum -c SHA256SUMS.txt --ignore-missing
+
+          ## What is tested in this build
+
+          Both packages were built and then started on a real X display, with two
+          packaged copies connecting to each other, before this release was created.
+
+          ## What is not
+
+          - **Linux on Wayland cannot share its screen.** Input works (through the
+            xdg-desktop-portal RemoteDesktop portal), but screen capture does not:
+            an X11 capturer cannot read the root window under Mutter. Log into an
+            Xorg session to host, or host from the other machine.
+          - **No Windows or macOS packages.** There is no Host backend for Windows,
+            and the macOS one has not been verified on real hardware yet. Both
+            platforms can build the project from source and act as a viewer.
+          NOTES
+
+          FILES=(dist-packages/*.AppImage dist-packages/*.deb dist-packages/SHA256SUMS.txt)
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            echo "Release $TAG exists; replacing its files."
+            gh release upload "$TAG" "${FILES[@]}" --clobber
+          else
+            gh release create "$TAG" \
+              --target "$GITHUB_SHA" \
+              --title "HopDesk $TAG" \
+              --notes-file /tmp/notes.md \
+              "${FILES[@]}"
+          fi
+          echo "Download page: ${{ github.server_url }}/${{ github.repository }}/releases/tag/$TAG"
