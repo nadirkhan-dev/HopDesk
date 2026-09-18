@@ -18,12 +18,25 @@ export function isTrustedSender(
   appContents: unknown | null,
   uiUrl: string,
 ): boolean {
-  if (!appContents || event.sender !== appContents) return false;
+  return isTrustedFrom(event, [{ contents: appContents, url: uiUrl }]);
+}
+
+/**
+ * The same rule for an app with more than one window of its own — the hidden
+ * window that captures the screen is a second legitimate caller, and it must be
+ * matched against its own page, not the main one.
+ */
+export function isTrustedFrom(
+  event: SenderLike,
+  allowed: { contents: unknown | null; url: string }[],
+): boolean {
   const frame = event.senderFrame;
   // A destroyed frame reports null: nothing to trust.
-  if (!frame) return false;
-  if (frame.parent) return false;
-  return stripHash(frame.url) === stripHash(uiUrl);
+  if (!frame || frame.parent) return false;
+  return allowed.some(entry =>
+    entry.contents !== null && entry.contents !== undefined
+    && event.sender === entry.contents
+    && stripHash(frame.url) === stripHash(entry.url));
 }
 
 const stripHash = (url: string) => url.replace(/[#?].*$/, '');

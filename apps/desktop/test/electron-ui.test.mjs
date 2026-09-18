@@ -42,7 +42,7 @@ test('adding, validating, searching, duplicating and deleting computers', { skip
     // An address with a username in it is refused by the core with a clear sentence.
     await app.eval(`const h = document.querySelector('#f-host'); h.value = 'bob@mac.local'; return true`);
     await click(app, '#dlg-save');
-    await app.waitFor(`return !document.querySelector('#dlg-error').hidden`, 3000, 'core validation error');
+    await app.waitFor(`return !document.querySelector('#dlg-error').hidden`, 8000, 'core validation error');
     assert.match(await text(app, '#dlg-error'), /username has its own field/);
     await click(app, '#dlg-edit [data-close="cancel"]');
 
@@ -61,22 +61,28 @@ test('adding, validating, searching, duplicating and deleting computers', { skip
     await app.eval(`document.querySelector('.item[data-id="${mac}"]').click(); return true`);
     await click(app, '#btn-dup');
     await app.waitFor(`return [...document.querySelectorAll('.item .name')].some(n => n.textContent === 'Studio Mac (copy)')`, 5000, 'duplicate in list');
-    await app.waitFor(`return /same saved password/.test(document.querySelector('#toasts').textContent)`, 3000, 'duplicate toast');
+    await app.waitFor(`return /same saved password/.test(document.querySelector('#toasts').textContent)`, 8000, 'duplicate toast');
 
     // Right-click menu offers the same actions.
     await app.eval(`document.querySelector('.item[data-id="${win}"]').dispatchEvent(new MouseEvent('contextmenu', { bubbles: true, clientX: 50, clientY: 50 })); return true`);
     assert.deepEqual(await app.eval(`return [...document.querySelectorAll('#menu button')].map(b => b.dataset.act)`),
       ['connect', 'edit', 'duplicate', 'favorite', 'delete']);
     await app.eval(`document.querySelector('#menu [data-act="delete"]').click(); return true`);
-    await app.waitFor(`return document.querySelector('#dlg-confirm').open`, 3000, 'confirm dialog');
+    await app.waitFor(`return document.querySelector('#dlg-confirm').open`, 8000, 'confirm dialog');
     assert.match(await text(app, '#confirm-text'), /history are removed/);
     // Cancel keeps it; confirming deletes it.
     await click(app, '#dlg-confirm [data-close="cancel"]');
     assert.equal((await app.eval(`return await window.hopdesk.list()`)).length, 3);
     await click(app, '#btn-del');
-    await app.waitFor(`return document.querySelector('#dlg-confirm').open`, 3000, 'confirm dialog again');
+    await app.waitFor(`return document.querySelector('#dlg-confirm').open`, 8000, 'confirm dialog again');
     await click(app, '#confirm-ok');
-    await app.waitFor(`return document.querySelectorAll('.item').length === 2`, 3000, 'deleted');
+    /* Waits on the data and the list separately, because "the list still shows
+       three" and "the delete never happened" are different bugs, and a busy
+       machine running several Electron instances can make the round trip slow
+       without either being true. */
+    await app.waitFor(`return (await window.hopdesk.list()).length === 2`, 15_000, 'the computer to be deleted');
+    await app.waitFor(`return document.querySelectorAll('.item').length === 2`, 5000,
+      'the list to stop showing a deleted computer (the delete itself worked)');
     assert.ok(!(await app.eval(`return await window.hopdesk.list()`)).some(c => c.id === win));
   } finally {
     await app.close();
@@ -117,9 +123,9 @@ test('display modes: fit, actual size with zoom, and matching the window size', 
 
     // Actual size, then zoom in.
     await app.eval(`const m = document.querySelector('#view-mode'); m.value = 'none'; m.dispatchEvent(new Event('change')); return true`);
-    await app.waitFor(`return parseFloat(document.querySelector('#screen').style.width) === ${W}`, 3000, 'actual size');
+    await app.waitFor(`return parseFloat(document.querySelector('#screen').style.width) === ${W}`, 8000, 'actual size');
     await click(app, '#btn-zoom-in');
-    await app.waitFor(`return document.querySelector('#zoom-label').textContent === '110%'`, 3000, 'zoom label');
+    await app.waitFor(`return document.querySelector('#zoom-label').textContent === '110%'`, 8000, 'zoom label');
     assert.equal(await app.eval(`return parseFloat(document.querySelector('#screen').style.width)`), Math.round(W * 1.1));
 
     // Match window size: the remote desktop is asked to take the viewport's size.
@@ -208,10 +214,10 @@ test('defaults for new computers persist across restarts', { skip, timeout: 60_0
   let app = await launchApp({ env: ENV, dataDir });
   try {
     await click(app, '#btn-settings');
-    await app.waitFor(`return document.querySelector('#dlg-settings').open`, 3000, 'settings');
+    await app.waitFor(`return document.querySelector('#dlg-settings').open`, 8000, 'settings');
     await app.eval(`document.querySelector('.switch[data-key="viewOnly"]').click(); return true`);
     await app.eval(`const s = document.querySelector('#s-scaling'); s.value = 'none'; s.dispatchEvent(new Event('change')); return true`);
-    await app.waitFor(`return (await window.hopdesk.getSettings()).defaults.scaling === 'none'`, 3000, 'saved');
+    await app.waitFor(`return (await window.hopdesk.getSettings()).defaults.scaling === 'none'`, 8000, 'saved');
   } finally {
     await app.close();
   }

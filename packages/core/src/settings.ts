@@ -12,16 +12,64 @@ import { DEFAULT_OPTIONS, type ConnectionOptions } from './connections.js';
  * as a trusted certificate or a shared folder never live here.
  */
 
+/**
+ * Letting other computers connect to this one. Off until the user turns it on,
+ * and unattended access off separately: an access code with someone present to
+ * allow the connection is a different decision from letting a saved password in
+ * while nobody is watching.
+ */
+export interface RemoteAccessSettings {
+  enabled: boolean;
+  /** TCP port the Host listens on for direct connections on the local network. */
+  port: number;
+  /** Announce this computer on the local network so it can be found by name. */
+  announce: boolean;
+  /** Allow connections with a stored password and no one present to allow them. */
+  unattended: boolean;
+  /**
+   * The SPAKE2 scalar derived from the unattended password, base64. Not the
+   * password, and not a password hash that can be replayed as one: it is what
+   * this computer needs to complete the handshake. Never sent anywhere.
+   */
+  unattendedVerifier?: string;
+}
+
+/** The HopDesk server this computer is signed in to, if any. Not secret. */
+export interface AccountSettings {
+  serverUrl?: string;
+  email?: string;
+  /**
+   * Always carry sessions through the server's relay instead of connecting the
+   * two computers directly. Slower and uses the server's bandwidth, but the two
+   * computers never learn each other's addresses.
+   */
+  forceRelay?: boolean;
+}
+
 export interface AppSettings {
   version: 1;
+  account: AccountSettings;
   defaults: Pick<ConnectionOptions,
     'scaling' | 'fullscreenOnConnect' | 'viewOnly' | 'shareClipboard' | 'enableAudio' | 'autoReconnect'>;
+  remoteAccess: RemoteAccessSettings;
 }
+
+/** The Host's default port for direct connections on a local network. */
+export const DEFAULT_HOST_PORT = 47631;
+
+export const DEFAULT_REMOTE_ACCESS: RemoteAccessSettings = {
+  enabled: false,
+  port: DEFAULT_HOST_PORT,
+  announce: true,
+  unattended: false,
+};
 
 const DEFAULT_KEYS = ['scaling', 'fullscreenOnConnect', 'viewOnly', 'shareClipboard', 'enableAudio', 'autoReconnect'] as const;
 
 export const DEFAULT_SETTINGS: AppSettings = {
   version: 1,
+  account: {},
+  remoteAccess: structuredClone(DEFAULT_REMOTE_ACCESS),
   defaults: {
     scaling: DEFAULT_OPTIONS.scaling,
     fullscreenOnConnect: DEFAULT_OPTIONS.fullscreenOnConnect,
@@ -43,7 +91,12 @@ export class SettingsStore {
     if (existsSync(this.file)) {
       try {
         const raw = JSON.parse(await readFile(this.file, 'utf8')) as Partial<AppSettings>;
-        this.data = { version: 1, defaults: sanitize({ ...DEFAULT_SETTINGS.defaults, ...(raw.defaults ?? {}) }) };
+        this.data = {
+          version: 1,
+          defaults: sanitize({ ...DEFAULT_SETTINGS.defaults, ...(raw.defaults ?? {}) }),
+          remoteAccess: sanitizeRemoteAccess(raw.remoteAccess),
+          account: sanitizeAccount(raw.account),
+        };
       } catch {
         // Settings are cheap to lose; the defaults are a working configuration.
         this.data = structuredClone(DEFAULT_SETTINGS);
@@ -54,8 +107,25 @@ export class SettingsStore {
 
   get(): AppSettings { return structuredClone(this.data); }
 
-  async update(patch: { defaults?: Partial<AppSettings['defaults']> }): Promise<AppSettings> {
+  async update(patch: {
+    defaults?: Partial<AppSettings['defaults']>;
+    remoteAccess?: Partial<RemoteAccessSettings>;
+    /** null clears a field, e.g. on sign-out. */
+    account?: { serverUrl?: string | null; email?: string | null; forceRelay?: boolean | null };
+  }): Promise<AppSettings> {
     this.data.defaults = sanitize({ ...this.data.defaults, ...(patch?.defaults ?? {}) });
+    if (patch?.remoteAccess) {
+      this.data.remoteAccess = sanitizeRemoteAccess({ ...this.data.remoteAccess, ...patch.remoteAccess });
+    }
+    if (patch?.account) {
+      const next: Record<string, unknown> = { ...this.data.account };
+      for (const key of ['serverUrl', 'email', 'forceRelay'] as const) {
+        const value = patch.account[key];
+        if (value === null) delete next[key];
+        else if (value !== undefined) next[key] = value;
+      }
+      this.data.account = sanitizeAccount(next);
+    }
     await mkdir(this.dataDir, { recursive: true });
     const tmp = `${this.file}.tmp`;
     await writeFile(tmp, JSON.stringify(this.data, null, 2), { mode: 0o600 });
@@ -76,4 +146,39 @@ function sanitize(input: Record<string, unknown>): AppSettings['defaults'] {
     }
   }
   return out as AppSettings['defaults'];
+}
+
+/**
+ * Remote access is security-sensitive, so a malformed or hand-edited file must
+ * never leave it more permissive than the defaults: anything unrecognised
+ * falls back to off.
+ */
+function sanitizeRemoteAccess(input: unknown): RemoteAccessSettings {
+  const out = structuredClone(DEFAULT_REMOTE_ACCESS);
+  if (typeof input !== 'object' || input === null) return out;
+  const raw = input as Record<string, unknown>;
+  if (typeof raw.enabled === 'boolean') out.enabled = raw.enabled;
+  if (typeof raw.announce === 'boolean') out.announce = raw.announce;
+  if (typeof raw.unattended === 'boolean') out.unattended = raw.unattended;
+  if (Number.isInteger(raw.port) && (raw.port as number) >= 1024 && (raw.port as number) <= 65535) {
+    out.port = raw.port as number;
+  }
+  // 32 bytes, base64: the scalar written by the app itself.
+  if (typeof raw.unattendedVerifier === 'string' && /^[A-Za-z0-9+/]{43}=$/.test(raw.unattendedVerifier)) {
+    out.unattendedVerifier = raw.unattendedVerifier;
+  }
+  // Unattended access without a verifier would be an open door.
+  if (!out.unattendedVerifier) out.unattended = false;
+  return out;
+}
+
+/** The server address and email only, and only in forms that make sense. */
+function sanitizeAccount(input: unknown): AccountSettings {
+  const out: AccountSettings = {};
+  if (typeof input !== 'object' || input === null) return out;
+  const raw = input as Record<string, unknown>;
+  if (typeof raw.serverUrl === 'string' && /^https?:\/\/[^\s]+$/.test(raw.serverUrl)) out.serverUrl = raw.serverUrl.slice(0, 200);
+  if (typeof raw.email === 'string' && raw.email.length <= 254) out.email = raw.email;
+  if (typeof raw.forceRelay === 'boolean') out.forceRelay = raw.forceRelay;
+  return out;
 }

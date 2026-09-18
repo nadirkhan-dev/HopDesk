@@ -1,0 +1,18 @@
+# TLS for the HopDesk server. Caddy obtains and renews the certificate itself.
+{
+	email {$HOPDESK_ACME_EMAIL}
+}
+
+{$HOPDESK_DOMAIN} {
+	encode zstd gzip
+
+	# The WebSocket rendezvous and the account API are the whole surface.
+	reverse_proxy server:8787
+
+	header {
+		Strict-Transport-Security "max-age=31536000"
+		X-Content-Type-Options nosniff
+		Referrer-Policy no-referrer
+		-Server
+	}
+}

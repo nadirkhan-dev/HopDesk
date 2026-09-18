@@ -11,6 +11,7 @@ import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { createRequire } from 'node:module';
+import { launchEnvironment, ozoneArgs } from '../../scripts/launch-args.mjs';
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 export const desktopDir = path.resolve(here, '../..');
@@ -27,17 +28,38 @@ export function electronUnavailableReason() {
   return null;
 }
 
-export async function launchApp({ env = {}, dataDir } = {}) {
-  const electronBinary = createRequire(import.meta.url)('electron');
+/**
+ * Starts the app.
+ *
+ * With `binary`, it starts a *packaged* build — an AppImage or the executable
+ * from an installed package — instead of the development one. That is the whole
+ * point of the packaging test: the development build can be perfect while the
+ * package is missing a dependency.
+ */
+export async function launchApp({ binary, env = {}, dataDir } = {}) {
   const xdg = dataDir ?? await mkdtemp(path.join(tmpdir(), 'hopdesk-e2e-'));
 
-  const childEnv = { ...process.env, XDG_DATA_HOME: xdg, ...env };
+  const childEnv = binary
+    // The packaged launcher decides the display backend and the environment
+    // itself; that decision is part of what a packaging test checks.
+    ? { ...process.env, XDG_DATA_HOME: xdg, ...env }
+    // The same environment a launcher sets, so the app starts as it does for a user.
+    : launchEnvironment({ ...process.env, XDG_DATA_HOME: xdg, ...env });
   // Set by VS Code's integrated terminal; it turns Electron into plain Node.
   delete childEnv.ELECTRON_RUN_AS_NODE;
 
-  const child = spawn(electronBinary,
-    [path.join(desktopDir, 'dist/main.js'), '--remote-debugging-port=0'],
-    { env: childEnv, stdio: ['ignore', 'pipe', 'pipe'] });
+  /* Chromium's sandbox needs a setuid helper. An AppImage cannot ship one (as
+     the README says), and on a CI runner the one in node_modules is not setuid
+     either, so Electron refuses to start at all. Everywhere else the sandbox
+     stays on, because that is what users run with. */
+  const sandbox = binary || childEnv.CI ? ['--no-sandbox'] : [];
+  const executable = binary ?? createRequire(import.meta.url)('electron');
+  const args = binary
+    ? [...sandbox, '--remote-debugging-port=0']
+    // ozoneArgs is what the real launchers pass; see scripts/launch-args.mjs.
+    : [path.join(desktopDir, 'dist/main.js'), ...sandbox, ...ozoneArgs(childEnv), '--remote-debugging-port=0'];
+
+  const child = spawn(executable, args, { env: childEnv, stdio: ['ignore', 'pipe', 'pipe'] });
 
   let output = '';
   const port = await new Promise((resolve, reject) => {

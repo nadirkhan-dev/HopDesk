@@ -1,8 +1,11 @@
 import {
-  app, BrowserWindow, ipcMain, shell, Menu, clipboard, screen, session as electronSession,
+  app, BrowserWindow, ipcMain, shell, Menu, clipboard, screen, desktopCapturer,
+  session as electronSession,
   type IpcMainInvokeEvent, type IpcMainEvent,
 } from 'electron';
+import { hostname } from 'node:os';
 import path from 'node:path';
+import { randomUUID } from 'node:crypto';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import {
   ConnectionManager, CredentialStore, SettingsStore, Session, ExternalEngine,
@@ -11,7 +14,19 @@ import {
   type Backend, type Connection, type FriendlyError, type RdpCertificate, type SessionStats,
 } from '@hopdesk/core';
 import { createLogger } from './logger.js';
-import { isTrustedSender } from './ipc-guard.js';
+import { isTrustedFrom, isTrustedSender } from './ipc-guard.js';
+import { loadIdentity, identityStorage, type LocalIdentity } from './identity.js';
+import { KnownDevices } from './devices.js';
+import { RtcBridge, type RtcPeerHandle } from './rtc-bridge.js';
+import { AccountClient } from './account.js';
+import { HostRole } from './host.js';
+import { ViewerRole } from './viewer.js';
+import { openInputController, linuxBackend, type InputController } from '@hopdesk/platform';
+import { createPermissionManager, openPermissionSettings, type PermissionReport } from './permissions.js';
+import {
+  MAX_CLIPBOARD_CHARS, unattendedVerifier, type ConsentDecision, type ConsentRequest,
+} from '@hopdesk/protocol';
+import { fromBase64, toBase64 } from '@hopdesk/crypto';
 
 /**
  * Main process.
@@ -29,9 +44,17 @@ import { isTrustedSender } from './ipc-guard.js';
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const UI_FILE = path.join(__dirname, '../renderer/index.html');
 const UI_URL = pathToFileURL(UI_FILE).href;
+/* The hidden window that captures this screen and holds the host's peer
+   connection. It has no interface; see renderer/host-rtc.js. */
+const HOST_FILE = path.join(__dirname, '../renderer/host-rtc.html');
+const HOST_URL = pathToFileURL(HOST_FILE).href;
 
 // Every renderer is sandboxed, including any created later by mistake.
 app.enableSandbox();
+
+/* Chromium's display backend is chosen before this script runs, so it cannot be
+   set here: see apps/desktop/scripts/launch-args.mjs, which every launcher
+   (dev, packaged, tests) uses to pass --ozone-platform. */
 
 // XDG paths, so the app behaves like a native Linux application rather than
 // scattering dotfiles in $HOME.
@@ -40,6 +63,7 @@ const dataDir = process.env.XDG_DATA_HOME
   : path.join(app.getPath('home'), '.local', 'share', 'hopdesk');
 
 const log = createLogger(dataDir);
+log.info(`session type: ${process.env.XDG_SESSION_TYPE ?? 'unknown'}, DISPLAY=${process.env.DISPLAY ?? 'none'}`);
 
 /* HOPDESK_CREDENTIAL_BACKEND=file forces the encrypted vault, for machines whose
    keyring misbehaves and for tests that must not touch the user's keyring. */
@@ -49,9 +73,17 @@ const forcedBackend = ((): Backend | undefined => {
 })();
 
 let window: BrowserWindow | null = null;
+let hostWindow: BrowserWindow | null = null;
 const credentials = new CredentialStore(dataDir, forcedBackend);
 const connections = new ConnectionManager(dataDir, credentials);
 const settings = new SettingsStore(dataDir);
+const knownDevices = new KnownDevices(dataDir);
+
+/** Set once the device identity has been loaded, at startup. */
+let localIdentity: LocalIdentity | null = null;
+let host: HostRole | null = null;
+let viewer: ViewerRole | null = null;
+let account: AccountClient | null = null;
 
 /** Certificates trusted "for this session only", by connection id. Never persisted. */
 const sessionTrust = new Map<string, string>();
@@ -92,6 +124,182 @@ function createWindow() {
   Menu.setApplicationMenu(null);
 }
 
+/* ------------------------------------------------- this computer as a host */
+
+/**
+ * The hidden window that captures this screen. Created when the first viewer is
+ * authorised and closed when the last session ends, so nothing is capturing
+ * while nobody is connected.
+ */
+async function ensureHostWindow(): Promise<BrowserWindow> {
+  if (hostWindow && !hostWindow.isDestroyed()) return hostWindow;
+  const win = new BrowserWindow({
+    show: false,
+    webPreferences: {
+      preload: path.join(__dirname, 'preload.cjs'),
+      contextIsolation: true,
+      nodeIntegration: false,
+      sandbox: true,
+      webviewTag: false,
+      // A hidden window would otherwise be throttled, which would stall capture.
+      backgroundThrottling: false,
+    },
+  });
+  hostWindow = win;
+  win.on('closed', () => { if (hostWindow === win) hostWindow = null; });
+  const ready = new Promise<void>((resolve, reject) => {
+    const timer = setTimeout(() => reject(new Error('The screen sharing window did not start')), 15_000);
+    ipcMain.once('host:ready', event => {
+      if (event.sender !== win.webContents) return;
+      clearTimeout(timer);
+      resolve();
+    });
+  });
+  await win.loadFile(HOST_FILE);
+  await ready;
+  return win;
+}
+
+function closeHostWindowIfIdle() {
+  if (!host || host.status().sessions.length) return;
+  const win = hostWindow;
+  hostWindow = null;
+  if (win && !win.isDestroyed()) win.destroy();
+}
+
+/** Renderers of this app that may speak to the main process. */
+const ownWindows = () => [
+  { contents: window && !window.isDestroyed() ? window.webContents : null, url: UI_URL },
+  { contents: hostWindow && !hostWindow.isDestroyed() ? hostWindow.webContents : null, url: HOST_URL },
+];
+
+const rtc = new RtcBridge(log, event => isTrustedFrom(event, ownWindows()));
+
+/**
+ * Input injection for the Host. X11 through XTest; created on first use and
+ * kept, since opening a display connection per keystroke would be absurd.
+ * A session where this is unavailable is view-only rather than broken.
+ */
+let inputController: InputController | null = null;
+let inputUnavailable: string | null = null;
+
+/**
+ * The controller for a session.
+ *
+ * If none has been opened yet — the app started with remote access already on,
+ * or a Wayland dialog is still to be answered — this starts opening one and
+ * returns null for now, so the first input message is dropped rather than the
+ * session waiting on a dialog. The next one works.
+ */
+function hostInput(): InputController | null {
+  if (!inputController && !inputUnavailable && !preparingInput) void prepareInput();
+  return inputController;
+}
+
+let preparingInput: Promise<string | null> | null = null;
+
+/**
+ * Opens the way in for the mouse and keyboard.
+ *
+ * X11 and macOS can do this at any moment. Wayland cannot: the compositor shows
+ * its own dialog, so this happens when the user switches remote access on —
+ * they are at the keyboard then, which is exactly when a permission dialog
+ * makes sense. If they refuse, sharing still works; it is just view-only, and
+ * the interface says so rather than pretending the keyboard is broken.
+ */
+function prepareInput(): Promise<string | null> {
+  if (inputController) return Promise.resolve(null);
+  preparingInput ??= (async () => {
+    try {
+      inputController = await openInputController();
+      inputUnavailable = null;
+      log.info(`input ready (${process.platform === 'linux' ? linuxBackend() : process.platform})`);
+      return null;
+    } catch (err) {
+      inputUnavailable = (err as Error).message;
+      log.warn(`input injection unavailable: ${inputUnavailable}`);
+      return inputUnavailable;
+    } finally {
+      preparingInput = null;
+    }
+  })();
+  return preparingInput;
+}
+
+/**
+ * What the operating system currently allows. Checked when remote access is
+ * switched on and shown in the interface, because on macOS a refused permission
+ * makes capture and input fail silently rather than loudly.
+ */
+const permissions = createPermissionManager();
+let permissionReport: PermissionReport | null = null;
+
+/**
+ * What this computer can actually share.
+ *
+ * On a Wayland desktop HopDesk runs through Xwayland, because Electron's
+ * Wayland backend crashes when it creates a window (reproduced on Electron 38,
+ * 42 and 44 here, while Chrome on the same machine is fine). Through Xwayland,
+ * the mouse and keyboard still reach the real desktop — those go through the
+ * portal, which is Wayland's own mechanism — but the *picture* is only of X11
+ * windows. Sharing a screen that shows almost nothing, without saying so, would
+ * be the worst of both.
+ */
+function waylandLimitation(): string | null {
+  if (process.platform !== 'linux') return null;
+  const onWayland = process.env.HOPDESK_DESKTOP_SESSION === 'wayland'
+    || process.env.XDG_SESSION_TYPE === 'wayland';
+  if (!onWayland) return null;
+  if (process.env.HOPDESK_OZONE_PLATFORM === 'wayland') return null;    // running natively
+  return 'This is a Wayland desktop, and HopDesk is running through Xwayland: someone connecting '
+    + 'can control the mouse and keyboard, but will only see windows that use X11. '
+    + 'Sharing the whole Wayland desktop needs HOPDESK_OZONE_PLATFORM=wayland, which crashes on '
+    + 'this machine (an Electron bug, see docs/ARCHITECTURE.md). Log in to an X11 session to share this screen.';
+}
+
+async function refreshPermissions(request = false): Promise<PermissionReport> {
+  permissionReport = request ? await permissions.request() : await permissions.check();
+  if (permissionReport.detail) log.warn(`permissions: ${permissionReport.detail}`);
+  return permissionReport;
+}
+
+/**
+ * Whether sessions must go through the relay. Off by default: a direct
+ * connection is faster and costs the server nothing.
+ */
+const icePolicy = (): 'all' | 'relay' =>
+  (settings.get().account.forceRelay ? 'relay' : 'all');
+
+/** Pending Allow/Reject questions, by id. */
+const consentRequests = new Map<string, (decision: ConsentDecision) => void>();
+
+/**
+ * Asks the person at this computer. With no window to ask in, the answer is no:
+ * a connection must never be allowed by default.
+ */
+function askConsent(request: ConsentRequest, signal: AbortSignal): Promise<ConsentDecision> {
+  if (!window || window.isDestroyed()) return Promise.resolve('reject');
+  const id = randomUUID();
+  return new Promise<ConsentDecision>(resolve => {
+    let done = false;
+    const settle = (decision: ConsentDecision) => {
+      if (done) return;
+      done = true;
+      consentRequests.delete(id);
+      send('consentWithdrawn', { id });
+      resolve(decision);
+    };
+    consentRequests.set(id, settle);
+    signal.addEventListener('abort', () => settle('reject'));
+    send('consentRequest', { id, viewerId: request.viewerId, viewerName: request.viewerName, auth: request.auth });
+    if (window && !window.isDestroyed()) {
+      // The person needs to see the question, wherever the window was.
+      window.show();
+      window.focus();
+    }
+  });
+}
+
 const send = (channel: string, payload: unknown) => {
   if (window && !window.isDestroyed()) window.webContents.send(channel, payload);
 };
@@ -105,9 +313,135 @@ app.on('web-contents-created', (_e, contents) => {
   contents.on('will-attach-webview', e => e.preventDefault());
 });
 
+/** Creates the Host and Viewer roles once the device identity is known. */
+function createRoles(identity: LocalIdentity) {
+  const hostRole = new HostRole({
+    identity,
+    hostName: hostname(),
+    log,
+    settings: () => settings.get().remoteAccess,
+    consent: askConsent,
+    createPeer: async (sessionId, iceServers) => {
+      const win = await ensureHostWindow();
+      const peer = rtc.attach(sessionId, win.webContents, iceServers, icePolicy());
+      return { peer, close: () => closeHostWindowIfIdle() };
+    },
+    input: hostInput,
+    // Only a signed-in computer can authorise an account connection.
+    accountAuthorised: (viewerId, viewerKey) => account?.authorises(viewerId, viewerKey) ?? false,
+    iceServers: () => account?.iceServers() ?? Promise.resolve([]),
+    clipboard: {
+      read: () => clipboard.readText(),
+      write: text => clipboard.writeText(text),
+    },
+    displaySize: () => {
+      const injector = inputController;
+      if (injector && 'width' in injector) {
+        const sized = injector as InputController & { width: number; height: number };
+        return { width: sized.width, height: sized.height };
+      }
+      // Physical pixels, which is what input coordinates are in.
+      const display = screen.getPrimaryDisplay();
+      return {
+        width: Math.round(display.size.width * display.scaleFactor),
+        height: Math.round(display.size.height * display.scaleFactor),
+      };
+    },
+    shareClipboard: () => settings.get().defaults.shareClipboard !== false,
+  });
+  hostRole.on('change', () => send('hostStatus', hostRole.status()));
+  hostRole.on('clipboard', (sessionId: string, message: unknown) => {
+    rtc.post(sessionId, 'host:send', { sessionId, label: 'clipboard', message });
+  });
+
+  const viewerRole = new ViewerRole({
+    identity,
+    viewerName: hostname(),
+    log,
+    createPeer: async (sessionId, iceServers) => {
+      if (!window || window.isDestroyed()) throw new Error('The HopDesk window is closed');
+      const peer: RtcPeerHandle = rtc.attach(sessionId, window.webContents, iceServers, icePolicy());
+      return { peer, close: () => {} };
+    },
+    iceServers: () => account?.iceServers() ?? Promise.resolve([]),
+    connectionKind: sessionId => rtc.connectionKind(sessionId),
+    pinnedKey: deviceId => knownDevices.keyFor(deviceId),
+    rememberKey: (deviceId, key, name) => knownDevices.remember(deviceId, key, name || deviceId),
+  });
+  viewerRole.on('status', (status: unknown) => send('deviceSession', status));
+
+  /* Signing in to a HopDesk server: it makes this computer reachable from
+     anywhere and lists the account's other computers. A session the server
+     relays goes through exactly the same Host path as one from this network. */
+  const accountClient = new AccountClient({
+    identity,
+    deviceName: hostname(),
+    storage: identityStorage(dataDir),
+    log,
+    onIncoming: (intro, link) => {
+      if (!settings.get().remoteAccess.enabled) {
+        // Not accepting connections: refuse rather than silently ignoring.
+        link.close(new Error('remote access is off on this computer'));
+        return;
+      }
+      /* The account's device list is checked against the key the caller signs
+         with, so it has to be current: a computer that enrolled after this one
+         last looked would otherwise be refused on its first connection. */
+      void accountClient.refreshComputers()
+        .catch(err => log.warn(`could not refresh the computer list: ${(err as Error).message}`))
+        .then(() => hostRole.acceptLink(link, `${intro.peer.name} (${intro.peer.deviceId}) via the HopDesk server`));
+    },
+    readSettings: () => settings.get().account,
+    writeSettings: async patch => { await settings.update({ account: patch }); },
+  });
+  accountClient.on('change', state => send('accountState', state));
+
+  return { hostRole, viewerRole, accountClient };
+}
+
 app.whenReady().then(async () => {
-  electronSession.defaultSession.setPermissionRequestHandler((_wc, _permission, callback) => callback(false));
-  electronSession.defaultSession.setPermissionCheckHandler(() => false);
+  /* The UI may not use the camera, microphone, notifications or anything else.
+     The one exception is the hidden capture window, which exists to share this
+     screen — and only while the user has turned remote access on. */
+  /* Chromium asks for screen sharing as 'media' with a video media type, and in
+     some paths as 'display-capture'. Both are allowed for the hidden capture
+     window and for nothing else — and never for audio, which HopDesk does not
+     capture. */
+  const allowCapture = (contents: Electron.WebContents | null, permission: string, mediaType?: string) =>
+    (permission === 'display-capture' || permission === 'media')
+    && mediaType !== 'audio'
+    && contents !== null
+    && hostWindow !== null && !hostWindow.isDestroyed() && contents === hostWindow.webContents
+    && settings.get().remoteAccess.enabled;
+  electronSession.defaultSession.setPermissionRequestHandler((wc, permission, callback, details) => {
+    const mediaTypes = (details as { mediaTypes?: string[] } | undefined)?.mediaTypes;
+    callback(allowCapture(wc, permission, mediaTypes?.includes('audio') ? 'audio' : undefined));
+  });
+  electronSession.defaultSession.setPermissionCheckHandler((wc, permission, _origin, details) =>
+    allowCapture(wc, permission, (details as { mediaType?: string } | undefined)?.mediaType));
+
+  /* getDisplayMedia asks the application which screen to share: the Host shares
+     the primary display. Answering it here means no picker appears on a machine
+     that is being connected to, which is the point of unattended access — the
+     consent prompt has already been answered by then. */
+  electronSession.defaultSession.setDisplayMediaRequestHandler((request, callback) => {
+    const fromHostWindow = hostWindow !== null && !hostWindow.isDestroyed()
+      && request.frame?.url === HOST_URL;
+    log.info(`display media request from ${request.frame?.url ?? 'unknown'} (expected ${HOST_URL})`);
+    if (!fromHostWindow || !settings.get().remoteAccess.enabled) {
+      callback({});
+      return;
+    }
+    void desktopCapturer.getSources({ types: ['screen'], fetchWindowIcons: false }).then(sources => {
+      const display = screen.getPrimaryDisplay();
+      const chosen = sources.find(s => s.display_id === String(display.id)) ?? sources[0];
+      log.info(`screen sources: ${sources.map(s => `${s.name}/${s.display_id}`).join(', ') || 'none'}`);
+      callback(chosen ? { video: chosen } : {});
+    }).catch(err => {
+      log.error(`screen capture unavailable: ${(err as Error).message}`);
+      callback({});
+    });
+  }, { useSystemPicker: false });
 
   try {
     await connections.load();
@@ -116,8 +450,39 @@ app.whenReady().then(async () => {
     log.error(`connections: ${(err as Error).message}`);
   }
   await settings.load();
+  await knownDevices.load();
+
+  try {
+    localIdentity = await loadIdentity(dataDir);
+    const roles = createRoles(localIdentity);
+    host = roles.hostRole;
+    viewer = roles.viewerRole;
+    account = roles.accountClient;
+    log.info(`device id ${localIdentity.deviceId}; identity key ${localIdentity.protectionDetail}`);
+  } catch (err) {
+    // Without an identity this computer cannot be a HopDesk host or viewer, but
+    // VNC and RDP still work, so the app starts and says what is missing.
+    log.error(`device identity unavailable: ${(err as Error).message}`);
+  }
+
   createWindow();
   app.on('activate', () => { if (!BrowserWindow.getAllWindows().length) createWindow(); });
+
+  if (host && settings.get().remoteAccess.enabled) {
+    try {
+      await host.start();
+      /* Remote access was already on when the app started. Open the way in for
+         the mouse and keyboard now — except on Wayland, where doing so shows
+         the compositor's dialog, and putting that in front of someone who has
+         just logged in would be rude. There it waits for a session. */
+      if (process.platform !== 'linux' || linuxBackend() !== 'wayland') await prepareInput();
+    } catch (err) {
+      log.error(`remote access could not start: ${(err as Error).message}`);
+    }
+  }
+
+  // Reconnect to the HopDesk server, if this computer was signed in.
+  if (account) await account.restore();
 });
 
 /* Leaving a session running with no window is a way to lose control of a
@@ -128,7 +493,15 @@ let shutdownFinished = false;
 function shutdown(): Promise<void> {
   shutdownDone ??= (async () => {
     stopActive();
+    // A session where someone is watching this screen must not outlive the app.
+    viewer?.disconnect();
+    account?.close();
+    await host?.stop();
+    // Closing the controller also hands back the Wayland portal session.
+    inputController?.close();
+    inputController = null;
     credentials.lock();
+    await knownDevices.flush();
     // Let the session's end reach the history file before the process exits.
     await Promise.race([connections.flush(), new Promise(r => setTimeout(r, 2000))]);
     shutdownFinished = true;
@@ -562,6 +935,10 @@ handle('getSettings', async () => ({
   rdpAvailable: Boolean(await rdpAvailable()),
   spiceAvailable: Boolean(await spiceAvailable()),
   defaults: settings.get().defaults,
+  /* Without the verifier: the UI needs to know whether unattended access is on,
+     never the value that would let it be used. */
+  remoteAccess: (({ enabled, port, announce, unattended }) => ({ enabled, port, announce, unattended }))(settings.get().remoteAccess),
+  account: settings.get().account,
 }));
 
 handle('updateSettings', async (patch: Parameters<SettingsStore['update']>[0]) => {
@@ -569,6 +946,226 @@ handle('updateSettings', async (patch: Parameters<SettingsStore['update']>[0]) =
   return { ok: true };
 });
 handle('openLogFolder', () => { void shell.openPath(dataDir); });
+
+/* --------------------------------------------------- this computer as a host */
+
+const hostUnavailable = () => ({
+  enabled: false, listening: false, deviceId: '', name: hostname(), accessCode: null,
+  port: 0, announcing: false, unattended: false,
+  keyProtection: 'unavailable',
+  detail: 'This computer has no HopDesk identity, so it cannot accept connections. See the log.',
+  sessions: [],
+});
+
+handle('hostStatus', () => ({
+  ...(host ? host.status() : hostUnavailable()),
+  ...(waylandLimitation() ? { detail: waylandLimitation() } : {}),
+  permissions: permissionReport,
+  inputAvailable: inputUnavailable === null,
+  ...(inputUnavailable ? { inputDetail: inputUnavailable } : {}),
+}));
+
+handle('checkPermissions', () => refreshPermissions(false));
+handle('requestPermissions', () => refreshPermissions(true));
+handle('openPermissionSettings', (action: string) => {
+  openPermissionSettings(action as PermissionReport['action']);
+  return { ok: true };
+});
+
+handle('setRemoteAccess', async (patch: { enabled?: boolean; announce?: boolean; port?: number; unattended?: boolean; unattendedPassword?: string | null }) => {
+  if (!host) throw new Error('This computer has no HopDesk identity yet');
+  /* Switching sharing on is the moment to ask the operating system, so the
+     answer arrives before someone tries to connect rather than after. On
+     Wayland this is also when the compositor asks about remote control. */
+  if (patch?.enabled === true) {
+    await refreshPermissions(true);
+    await prepareInput();
+  }
+  const update: Parameters<SettingsStore['update']>[0] = { remoteAccess: {} };
+
+  if (typeof patch?.announce === 'boolean') update.remoteAccess!.announce = patch.announce;
+  if (Number.isInteger(patch?.port)) update.remoteAccess!.port = patch.port;
+
+  /* Unattended access: a password is turned into the handshake verifier here and
+     the password itself is never stored, logged or sent. Turning it off removes
+     the verifier, so the door closes rather than merely hiding. */
+  if (patch?.unattendedPassword !== undefined) {
+    if (patch.unattendedPassword === null || patch.unattendedPassword === '') {
+      update.remoteAccess!.unattended = false;
+      update.remoteAccess!.unattendedVerifier = undefined;
+    } else {
+      if (patch.unattendedPassword.length < 8) throw new Error('Choose an unattended access password of at least 8 characters');
+      const verifier = await unattendedVerifier(patch.unattendedPassword, host.deviceId);
+      update.remoteAccess!.unattendedVerifier = toBase64(verifier);
+      update.remoteAccess!.unattended = patch.unattended !== false;
+    }
+  } else if (typeof patch?.unattended === 'boolean') {
+    update.remoteAccess!.unattended = patch.unattended;
+  }
+  if (typeof patch?.enabled === 'boolean') update.remoteAccess!.enabled = patch.enabled;
+
+  const next = await settings.update(update);
+  const wanted = next.remoteAccess.enabled;
+  const listening = host.status().listening;
+  if (wanted && !listening) await host.start();
+  else if (!wanted && listening) await host.stop();
+  else if (wanted && listening && (patch?.port !== undefined || patch?.announce !== undefined)) {
+    // The port or announcement changed: restart the listener on the new one.
+    await host.stop();
+    await host.start();
+  }
+  return host.status();
+});
+
+handle('regenerateAccessCode', () => {
+  if (!host) throw new Error('This computer has no HopDesk identity yet');
+  host.regenerateCode();
+  return host.status();
+});
+
+handle('endHostSession', (id: string, reason?: string) => {
+  host?.endSession(String(id), reason === 'revoked' ? 'revoked' : 'user-disconnected');
+  closeHostWindowIfIdle();
+  return host ? host.status() : hostUnavailable();
+});
+
+handle('answerConsent', (id: string, decision: string) => {
+  const settle = consentRequests.get(String(id));
+  if (!settle) return { ok: false };
+  settle(decision === 'allow' ? 'allow' : 'reject');
+  return { ok: true };
+});
+
+/* Messages from the hidden capture window: a viewer's input, its clipboard, and
+   its window size. Each is validated against the protocol schema in HostRole
+   before it reaches the platform. */
+function fromHostWindow(e: IpcMainEvent) {
+  return isTrustedFrom(e, [{ contents: hostWindow && !hostWindow.isDestroyed() ? hostWindow.webContents : null, url: HOST_URL }]);
+}
+
+ipcMain.on('host:input', (e, payload: { sessionId?: unknown; message?: unknown }) => {
+  if (!fromHostWindow(e) || typeof payload?.sessionId !== 'string') return;
+  host?.handleInput(payload.sessionId, payload.message);
+});
+
+ipcMain.on('host:clipboard', (e, payload: { sessionId?: unknown; message?: unknown }) => {
+  if (!fromHostWindow(e) || typeof payload?.sessionId !== 'string') return;
+  host?.handleClipboard(payload.sessionId, payload.message);
+});
+
+ipcMain.on('host:display', (e, payload: { sessionId?: unknown; message?: unknown }) => {
+  if (!fromHostWindow(e) || typeof payload?.sessionId !== 'string') return;
+  // Only logged for now: resizing the host display to fit a viewer comes with
+  // the display manager, and a message the host ignores must not break a session.
+  log.info(`session ${payload.sessionId} sent a display message`);
+});
+
+ipcMain.on('host:log', (e, text: unknown) => {
+  if (!fromHostWindow(e) || typeof text !== 'string') return;
+  log.info(`capture window: ${text.slice(0, 200)}`);
+});
+
+/* ---------------------------------------- connecting to another computer */
+
+handle('connectDevice', async (request: { deviceId?: string; code?: string; address?: string; port?: number }) => {
+  if (!viewer) throw new Error('This computer has no HopDesk identity yet');
+  return viewer.connect({
+    deviceId: String(request?.deviceId ?? ''),
+    code: String(request?.code ?? ''),
+    ...(request?.address ? { address: String(request.address) } : {}),
+    ...(Number.isInteger(request?.port) ? { port: request.port } : {}),
+  });
+});
+
+handle('disconnectDevice', () => {
+  viewer?.disconnect();
+  return { ok: true };
+});
+
+/* The viewer's own window sends control messages for its session: its size, and
+   keep-alives. Input and clipboard go over the data channels, not through here. */
+ipcMain.on('viewerSend', (e, payload: { label?: unknown; message?: unknown }) => {
+  if (!fromOurWindow(e) || !viewer) return;
+  const message = payload?.message;
+  if (payload?.label !== 'control' || typeof message !== 'object' || message === null) return;
+  try {
+    viewer.send(message as Parameters<NonNullable<typeof viewer>['send']>[0]);
+  } catch (err) {
+    log.warn(`viewer control message refused: ${(err as Error).message}`);
+  }
+});
+
+/* The viewer's clipboard, which only the main process can reach. Both
+   directions are limited to what a clipboard message may carry, and the text
+   itself is never logged. */
+handle('viewerClipboardRead', async () => {
+  if (!viewer || viewer.current().state !== 'connected') return '';
+  if (settings.get().defaults.shareClipboard === false) return '';
+  const text = await clipboard.readText();
+  return text.slice(0, MAX_CLIPBOARD_CHARS);
+});
+
+handle('viewerClipboardWrite', async (text: string) => {
+  if (!viewer || viewer.current().state !== 'connected') return { ok: false };
+  if (settings.get().defaults.shareClipboard === false) return { ok: false };
+  if (typeof text !== 'string' || text.length > MAX_CLIPBOARD_CHARS) return { ok: false };
+  await clipboard.writeText(text);
+  return { ok: true };
+});
+
+/* ------------------------------------------------------ HopDesk account */
+
+const accountUnavailable = { signedIn: false, relay: 'offline' as const, computers: [], detail: 'This computer has no HopDesk identity yet.' };
+
+handle('accountState', () => account?.state() ?? accountUnavailable);
+
+handle('accountSignIn', async (request: { serverUrl?: string; email?: string; password?: string; create?: boolean; token?: string }) => {
+  if (!account) throw new Error('This computer has no HopDesk identity yet');
+  const serverUrl = String(request?.serverUrl ?? '').trim();
+  const email = String(request?.email ?? '').trim();
+  const password = String(request?.password ?? '');
+  if (!serverUrl || !email || !password) throw new Error('Enter the server address, your email and your password');
+  return request?.create
+    ? account.register(serverUrl, email, password, String(request?.token ?? '').trim() || undefined)
+    : account.signIn(serverUrl, email, password);
+});
+
+handle('accountSignOut', () => account?.signOut() ?? accountUnavailable);
+handle('accountRefresh', async () => {
+  if (!account) return accountUnavailable;
+  await account.refreshComputers();
+  return account.state();
+});
+handle('accountRemoveComputer', async (deviceId: string) => {
+  if (!account) throw new Error('Not signed in');
+  await account.removeComputer(String(deviceId));
+  return account.state();
+});
+
+/**
+ * Connects to a computer on the account: the server introduces the two, and
+ * from there it is the same session as one made on a local network.
+ */
+handle('connectComputer', async (deviceId: string) => {
+  if (!account || !viewer) throw new Error('Not signed in');
+  const target = account.state().computers.find(c => c.deviceId === deviceId);
+  if (!target) throw new Error('That computer is not on this account');
+  if (target.self) throw new Error('That is this computer');
+  const { intro, link } = await account.openSession(String(deviceId));
+  try {
+    return await viewer.connectAccount(link, {
+      deviceId: intro.peer.deviceId,
+      name: intro.peer.name,
+      ...(intro.peer.publicKey ? { publicKey: fromBase64(intro.peer.publicKey) } : {}),
+    });
+  } catch (err) {
+    link.close(err as Error);
+    throw err;
+  }
+});
+
+handle('knownDevices', () => knownDevices.list().map(d => ({ deviceId: d.deviceId, name: d.name, lastConnected: d.lastConnected })));
+handle('forgetDevice', (deviceId: string) => { knownDevices.forget(String(deviceId)); return { ok: true }; });
 
 /* Anything unhandled reaches the log rather than vanishing or killing the app
    with a dialog the user cannot act on. */

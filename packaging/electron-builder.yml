@@ -8,6 +8,9 @@ directories:
   output: dist-packages
   buildResources: packaging
 
+# Wraps the Linux binary in a launcher that picks a display backend that works.
+afterPack: packaging/after-pack.cjs
+
 # The workspace root has no "main"; point the packaged app at the desktop entry.
 # Electron decides whether to load the entry as an ES module from the app's
 # root package.json, so the packaged copy must say "type": "module" too;
@@ -27,14 +30,76 @@ files:
   - apps/desktop/package.json
   - apps/desktop/dist/**
   - apps/desktop/renderer/**
-  # @hopdesk/core is an npm workspace, i.e. a symlink electron-builder does not
-  # follow. It has no runtime dependencies, so its build is copied to where
-  # Node's resolution from main.js finds it.
+  # The workspace packages are symlinks, which electron-builder does not follow,
+  # so each build is copied to where Node's resolution from main.js finds it.
   - from: packages/core
     to: node_modules/@hopdesk/core
     filter: [package.json, dist/**]
+  - from: packages/crypto
+    to: node_modules/@hopdesk/crypto
+    filter: [package.json, dist/**]
+  - from: packages/protocol
+    to: node_modules/@hopdesk/protocol
+    filter: [package.json, dist/**]
+  - from: packages/transport
+    to: node_modules/@hopdesk/transport
+    filter: [package.json, dist/**]
+  # @hopdesk/platform binds libXtst through koffi, which is a native module:
+  # its prebuilt binaries have to travel with it.
+  - from: packages/platform
+    to: node_modules/@hopdesk/platform
+    filter: [package.json, dist/**]
+  # Everything those packages need at run time. Worked out with a walk of the
+  # production dependency closure rather than by hand, because a missing one
+  # only shows up when the packaged app is started (which the packaging test
+  # does, for exactly this reason).
+  - from: node_modules/@noble
+    to: node_modules/@noble
+  - from: node_modules/@homebridge
+    to: node_modules/@homebridge
+  - from: node_modules/koffi
+    to: node_modules/koffi
+  # koffi's prebuilt binary lives in its own package, per platform.
+  - from: node_modules/@koromix
+    to: node_modules/@koromix
+  - from: node_modules/duplexer
+    to: node_modules/duplexer
+  - from: node_modules/event-stream
+    to: node_modules/event-stream
+  - from: node_modules/from
+    to: node_modules/from
+  - from: node_modules/hexy
+    to: node_modules/hexy
+  - from: node_modules/long
+    to: node_modules/long
+  - from: node_modules/map-stream
+    to: node_modules/map-stream
+  - from: node_modules/minimist
+    to: node_modules/minimist
+  - from: node_modules/pause-stream
+    to: node_modules/pause-stream
+  - from: node_modules/safe-buffer
+    to: node_modules/safe-buffer
+  - from: node_modules/sax
+    to: node_modules/sax
+  - from: node_modules/split
+    to: node_modules/split
+  - from: node_modules/stream-combiner
+    to: node_modules/stream-combiner
+  - from: node_modules/through
+    to: node_modules/through
+  - from: node_modules/xml2js
+    to: node_modules/xml2js
+  - from: node_modules/xmlbuilder
+    to: node_modules/xmlbuilder
   - "!**/*.map"
   - "!**/test/**"
+
+# koffi is a native module: its .node files cannot be loaded from inside the
+# asar archive, so they are unpacked beside it.
+asarUnpack:
+  - node_modules/koffi/**
+  - node_modules/@koromix/**
 
 linux:
   category: Network
@@ -47,6 +112,31 @@ linux:
       GenericName: Remote Desktop Client
       Keywords: remote;desktop;vnc;rdp;spice;
       StartupWMClass: HopDesk
+
+# macOS. Untested: no Mac has built this yet — see packaging/build-macos.sh.
+mac:
+  category: public.app-category.utilities
+  target:
+    - target: dmg
+      arch: [arm64, x64]
+    - target: zip          # what an auto-updater would fetch
+      arch: [arm64, x64]
+  hardenedRuntime: true
+  gatekeeperAssess: false
+  entitlements: packaging/entitlements.mac.plist
+  entitlementsInherit: packaging/entitlements.mac.plist
+  # Screen Recording and Accessibility are not entitlements: macOS asks the user
+  # and remembers the answer per application. These strings are what it shows.
+  extendInfo:
+    NSCameraUsageDescription: HopDesk does not use the camera.
+    NSMicrophoneUsageDescription: HopDesk does not use the microphone.
+    # A signed, notarised app is required for the Accessibility permission to
+    # stick across updates; an unsigned build has to be re-approved each time.
+    LSMinimumSystemVersion: '12.0'
+  notarize: false          # turned on by build-macos.sh when credentials exist
+
+dmg:
+  title: HopDesk ${version}
 
 deb:
   # FreeRDP is what RDP sessions run on. Recommended rather than required so

@@ -163,11 +163,17 @@ export type ConsentDecision = 'allow' | 'reject';
 
 export interface AcceptOptions {
   /**
-   * Asks the person at this computer. Only consulted for access-code
-   * connections: grants resume an already-approved session, and unattended
-   * access is an explicit opt-in that replaces the prompt.
+   * Asks the person at this computer. Consulted for an access code and for a
+   * computer on the same account: both are someone deciding to connect now.
+   * A grant resumes an already-approved session, and unattended access is an
+   * explicit opt-in that stands in for the answer.
    */
   authorize: (request: ConsentRequest, signal: AbortSignal) => Promise<ConsentDecision>;
+  /**
+   * Which kinds of connection need that prompt. The default asks for `code` and
+   * `account`; a host with unattended access enabled overrides it.
+   */
+  needsConsent?: (auth: AuthKind) => boolean;
   grants: GrantStore;
   handshakeTimeoutMs?: number;
   consentTimeoutMs?: number;
@@ -224,7 +230,8 @@ export async function acceptViewer(link: MessageLink, auth: HostAuthenticator, o
     return new HandshakeError('rejected', `Connection not allowed: ${reason}`);
   };
 
-  if (viewer.auth === 'code') {
+  const needsConsent = opts.needsConsent ?? (auth => auth === 'code' || auth === 'account');
+  if (needsConsent(viewer.auth)) {
     const abort = new AbortController();
     control.onClose(() => abort.abort());
     const decision = await withTimeout(

@@ -9,7 +9,8 @@
     "start": "env -u ELECTRON_RUN_AS_NODE electron dist/main.js"
   },
   "dependencies": {
-    "@hopdesk/core": "*"
+    "@hopdesk/core": "*",
+    "@hopdesk/platform": "*"
   },
   "devDependencies": {
     "@types/node": "^22.10.2",

@@ -13,7 +13,10 @@ command: hopdesk
 separate-locales: false
 # The Freedesktop SDK has no Node.js; the extension provides it at build time only.
 sdk-extensions:
-  - org.freedesktop.Sdk.Extension.node20
+  # node22: the crypto libraries need Node 20.19 or newer to install, and the
+  # node20 extension is older than that. This only builds the app; what it runs
+  # on is Electron's own Node.
+  - org.freedesktop.Sdk.Extension.node22
 
 finish-args:
   - --share=ipc
@@ -81,11 +84,11 @@ modules:
   - name: hopdesk
     buildsystem: simple
     build-options:
-      append-path: /usr/lib/sdk/node20/bin
+      append-path: /usr/lib/sdk/node22/bin
       env:
         # Flatpak builds have no network: npm and Electron's downloader are fed
         # from generated-sources.json (see the comment on that source below).
-        npm_config_nodedir: /usr/lib/sdk/node20
+        npm_config_nodedir: /usr/lib/sdk/node22
         npm_config_offline: 'true'
         npm_config_cache: /run/build/hopdesk/flatpak-node/npm-cache
         XDG_CACHE_HOME: /run/build/hopdesk/flatpak-node/cache

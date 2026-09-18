@@ -5,7 +5,7 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <!-- Only this app's own scripts and styles; no network, no plugins, no frames. -->
 <meta http-equiv="Content-Security-Policy"
-      content="default-src 'none'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; font-src 'self'; connect-src 'none'; object-src 'none'; frame-src 'none'; base-uri 'none'; form-action 'none'">
+      content="default-src 'none'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; font-src 'self'; media-src 'self' blob: mediastream:; connect-src 'none'; object-src 'none'; frame-src 'none'; base-uri 'none'; form-action 'none'">
 <title>HopDesk</title>
 <style>
   /* Adwaita-adjacent so the app does not look foreign on GNOME, with a dark
@@ -124,6 +124,39 @@
   .when { font-size: 11px; }
   .star { font-size: 13px; }
   .live-dot { width: 8px; height: 8px; border-radius: 50%; background: var(--ok); flex-shrink: 0; }
+  .card { padding: 12px 14px; border-bottom: 1px solid var(--border); }
+  .card-head { font-size: 11px; letter-spacing: .08em; color: var(--text-dim); margin-bottom: 8px; }
+  .card .row { display: flex; align-items: center; gap: 8px; margin-bottom: 10px; }
+  .card .field { margin-bottom: 8px; }
+  .card label { display: block; font-size: 12px; color: var(--text-dim); margin-bottom: 3px; }
+  .card input { width: 100%; }
+  .value-row { display: flex; align-items: center; gap: 6px; }
+  .mono { font-family: 'Source Code Pro', ui-monospace, monospace; }
+  .big { font-size: 15px; font-weight: 600; letter-spacing: .04em; }
+  output.mono { flex: 1; user-select: all; }
+  .btn.small { padding: 2px 8px; font-size: 12px; }
+  .btn.wide { width: 100%; justify-content: center; }
+  .dot { width: 9px; height: 9px; border-radius: 50%; background: var(--text-dim); display: inline-block; }
+  .dot.on { background: var(--ok); }
+  .dot.off { background: var(--text-dim); }
+  .hint { font-size: 12px; color: var(--text-dim); margin: 4px 0 0; }
+  .warn-text { font-size: 12px; color: var(--warn); margin: 4px 0 0; }
+  .error-text { font-size: 12px; color: var(--danger); margin: 8px 0 0; }
+  .session-row { display: flex; align-items: center; gap: 6px; font-size: 12px; margin-top: 6px; }
+  .or { display: flex; align-items: center; gap: 8px; margin: 10px 0; color: var(--text-dim); font-size: 12px; }
+  .or::before, .or::after { content: ""; flex: 1; height: 1px; background: var(--border); }
+  .computer { display: flex; align-items: center; gap: 8px; padding: 6px 0; border-bottom: 1px solid var(--border); }
+  .computer:last-child { border-bottom: none; }
+  .computer .name { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .computer .dot { flex-shrink: 0; }
+  .session-row .who { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .advanced { border-top: 1px solid var(--border); display: flex; flex-direction: column; min-height: 0; flex: 1; }
+  .advanced > summary { padding: 10px 14px; font-size: 12px; color: var(--text-dim); cursor: pointer; }
+  #cd-more > summary { font-size: 12px; color: var(--text-dim); cursor: pointer; margin-top: 8px; }
+  .hd-view { flex: 1; display: flex; flex-direction: column; background: #000; min-width: 0; }
+  .hd-bar { display: flex; align-items: center; gap: 8px; padding: 6px 10px; background: var(--surface); border-bottom: 1px solid var(--border); }
+  #hd-video { flex: 1; width: 100%; height: 100%; object-fit: contain; background: #000; outline: none; min-height: 0; }
+  body.hd-session aside, body.hd-session #pane { display: none; }
   .nearby { border-top: 1px solid var(--border); max-height: 40%; display: flex; flex-direction: column; }
   .nearby .list { padding-top: 0; }
 
@@ -293,15 +326,88 @@
 
 <main>
   <aside>
-    <div class="list-head"><span>Computers</span><span id="count"></span></div>
-    <div class="list" id="list" role="listbox" aria-label="Saved computers"></div>
-    <div class="nearby" id="nearby" hidden>
-      <div class="list-head"><span>On this network</span><button class="btn ghost" id="btn-nearby-close" aria-label="Hide">✕</button></div>
-      <div class="list" id="nearby-list" aria-live="polite"></div>
-    </div>
+    <section class="card" id="mine">
+      <div class="card-head">THIS COMPUTER</div>
+      <div class="row"><span class="dot off" id="mine-dot"></span><span id="mine-state">Off</span>
+        <button class="btn ghost small" id="mine-toggle">Turn on</button></div>
+      <div class="field">
+        <label for="mine-id">Device ID</label>
+        <div class="value-row"><output class="mono big" id="mine-id">—</output>
+          <button class="btn ghost small" id="mine-copy-id">Copy</button></div>
+      </div>
+      <div class="field">
+        <label for="mine-code">Access code</label>
+        <div class="value-row"><output class="mono big" id="mine-code">— — —</output>
+          <button class="btn ghost small" id="mine-copy-code">Copy</button>
+          <button class="btn ghost small" id="mine-regen" title="Replace the access code">New code</button></div>
+      </div>
+      <p class="hint" id="mine-protection"></p>
+      <p class="warn-text" id="mine-detail" hidden></p>
+      <button class="btn small" id="mine-fix" hidden>Open System Settings</button>
+      <div id="mine-sessions" hidden></div>
+    </section>
+
+    <section class="card" id="connect">
+      <div class="card-head">CONNECT</div>
+      <div class="field">
+        <label for="cd-id">Device ID</label>
+        <input id="cd-id" placeholder="HD-7K3M-Q9TX" autocomplete="off" spellcheck="false">
+      </div>
+      <div class="field">
+        <label for="cd-code">Access code</label>
+        <input id="cd-code" placeholder="739 421" autocomplete="off" inputmode="numeric">
+      </div>
+      <button class="btn primary wide" id="btn-connect-device">Connect</button>
+      <p class="error-text" id="cd-error" hidden></p>
+      <div class="or"><span>or</span></div>
+      <button class="btn wide" id="btn-signin">Sign in to a HopDesk server</button>
+      <details id="cd-more">
+        <summary>More options</summary>
+        <div class="field">
+          <label for="cd-address">Address (only if this network blocks discovery)</label>
+          <input id="cd-address" placeholder="192.168.1.20" autocomplete="off" spellcheck="false">
+        </div>
+        <p class="hint mono" id="cd-error-detail" hidden></p>
+      </details>
+    </section>
+
+    <section class="card" id="mycomputers" hidden>
+      <div class="card-head">MY COMPUTERS <span id="mc-relay" class="badge"></span></div>
+      <div id="mc-list"></div>
+      <p class="hint" id="mc-detail"></p>
+      <div class="row">
+        <button class="btn ghost small" id="mc-refresh">Refresh</button>
+        <button class="btn ghost small" id="mc-signout">Sign out</button>
+      </div>
+    </section>
+
+    <details class="advanced" id="advanced">
+      <summary>Advanced connection (VNC, RDP)</summary>
+      <div class="list-head"><span>Computers</span><span id="count"></span></div>
+      <div class="list" id="list" role="listbox" aria-label="Saved computers"></div>
+      <div class="nearby" id="nearby" hidden>
+        <div class="list-head"><span>On this network</span><button class="btn ghost" id="btn-nearby-close" aria-label="Hide">✕</button></div>
+        <div class="list" id="nearby-list" aria-live="polite"></div>
+      </div>
+    </details>
   </aside>
 
   <section class="pane" id="pane"></section>
+
+  <!-- A live HopDesk session: the other computer's screen. -->
+  <section class="hd-view" id="hd-view" hidden>
+    <header class="hd-bar">
+      <strong id="hd-name">Remote computer</strong>
+      <span class="badge" id="hd-status">Not connected</span>
+      <span class="badge" id="hd-how" hidden></span>
+      <div class="spacer"></div>
+      <button class="btn ghost" id="hd-send-clipboard">Send clipboard</button>
+      <button class="btn ghost" id="hd-fullscreen" title="Ctrl+Alt+Enter">Fullscreen</button>
+      <button class="btn" id="hd-disconnect">Disconnect</button>
+    </header>
+    <!-- tabindex so the element takes keyboard focus and can forward keys. -->
+    <video id="hd-video" tabindex="0" autoplay playsinline muted></video>
+  </section>
 </main>
 
 <div class="menu" id="menu" role="menu" hidden></div>
@@ -450,6 +556,44 @@
       <button class="btn primary" type="button" id="cert-always" data-close="always">Always trust</button>
     </div>
   </form>
+</dialog>
+
+<dialog id="dlg-signin" aria-labelledby="signin-title">
+  <div class="dlg-head"><h1 id="signin-title">Sign in to a HopDesk server</h1></div>
+  <div class="dlg-body">
+    <p class="hint">A HopDesk server is one you or your organisation runs. It lists your
+      computers so you can connect to them from anywhere, and passes connections along when
+      two computers cannot reach each other directly. It never sees what is on your screen.</p>
+    <div class="field"><label for="si-server">Server address</label>
+      <input id="si-server" placeholder="https://hopdesk.example.com" autocomplete="off" spellcheck="false"></div>
+    <div class="field"><label for="si-email">Email</label>
+      <input id="si-email" type="email" autocomplete="username"></div>
+    <div class="field"><label for="si-password">Password</label>
+      <input id="si-password" type="password" autocomplete="current-password"></div>
+    <label class="toggle"><span>Create a new account on this server</span>
+      <input type="checkbox" id="si-create"></label>
+    <div class="field" id="si-token-field" hidden>
+      <label for="si-token">Registration token</label>
+      <input id="si-token" autocomplete="off" spellcheck="false" placeholder="from whoever runs the server">
+      <p class="hint">Servers ask for this so that only people who were given it can create an account.</p>
+    </div>
+    <p class="error-text" id="si-error" hidden></p>
+  </div>
+  <div class="dlg-foot">
+    <button class="btn" id="si-cancel">Cancel</button>
+    <button class="btn primary" id="si-submit">Sign in</button>
+  </div>
+</dialog>
+
+<dialog id="dlg-consent" aria-labelledby="consent-title">
+  <h2 id="consent-title">Allow this computer to connect?</h2>
+  <p><strong id="consent-who">A computer</strong> wants to see and control this computer.</p>
+  <p class="hint mono" id="consent-id"></p>
+  <p class="hint" id="consent-method"></p>
+  <menu>
+    <button class="btn" id="consent-reject" autofocus>Reject</button>
+    <button class="btn primary" id="consent-allow">Allow</button>
+  </menu>
 </dialog>
 
 <dialog id="dlg-confirm" aria-labelledby="confirm-title">

@@ -1,0 +1,172 @@
+# What CI can and cannot prove for HopDesk.
+#
+# Linux runs everything, including the tests that start two real HopDesk
+# applications against two X displays and connect them to each other.
+#
+# Windows and macOS build the whole project and run every test that does not
+# need a desktop of that platform. They do **not** prove HopDesk works there:
+# the Host has no capture or input code for Windows or macOS yet, and those
+# tests skip themselves rather than pretending. Treat a green run on those
+# platforms as "it compiles and the portable parts pass", nothing more.
+
+name: CI
+
+on:
+  push:
+    branches: ["**"]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  linux:
+    name: Linux (full suite)
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update
+          # tigervnc-standalone-server: the X displays the application tests run
+          #   against, which also serve VNC for the protocol tests.
+          # libxtst6: XTest, which the Host injects input through.
+          sudo apt-get install -y --no-install-recommends \
+            libxtst6 libnss3 libasound2t64 libgtk-3-0t64 \
+            tigervnc-standalone-server x11-utils freerdp2-x11
+
+      - run: npm ci
+      - run: npm run build
+      - run: npm run typecheck
+      - run: npm run lint
+
+      - name: Start the displays and VNC servers the tests use
+        run: |
+          # Two screens that also speak VNC: the application tests connect one
+          # HopDesk to another, and the protocol tests need a real VNC server.
+          scripts/test-displays.sh
+          echo "DISPLAY=:31" >> "$GITHUB_ENV"
+          echo "HOPDESK_HOST_DISPLAY=:31" >> "$GITHUB_ENV"
+          echo "HOPDESK_VIEWER_DISPLAY=:32" >> "$GITHUB_ENV"
+          echo "HOPDESK_TEST_DISPLAY=:31" >> "$GITHUB_ENV"
+          echo "HOPDESK_X11_DISPLAY=:31" >> "$GITHUB_ENV"
+          # A suite that silently skips proves nothing: on Linux everything runs.
+          echo "HOPDESK_REQUIRE_DISPLAY=1" >> "$GITHUB_ENV"
+          echo "HOPDESK_REQUIRE_VNC=1" >> "$GITHUB_ENV"
+          echo "HOPDESK_REQUIRE_RDP=1" >> "$GITHUB_ENV"
+
+      - name: Package tests
+        run: npm run test:packages
+
+      - name: Application tests (two real HopDesk instances)
+        run: npm run test:desktop
+
+      - name: Keep the logs from a failed run
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: linux-logs
+          path: |
+            /tmp/hopdesk-*/**/*.log
+          if-no-files-found: ignore
+
+  linux-package:
+    name: Linux packages (built and started)
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            libxtst6 libnss3 libasound2t64 libgtk-3-0t64 libfuse2t64 \
+            tigervnc-standalone-server
+
+      - name: Build the AppImage and the .deb
+        env:
+          HOPDESK_HOMEPAGE: https://github.com/hopdesk/hopdesk
+        run: bash packaging/build-appimage.sh
+
+      - name: Start the packaged app and connect two of them
+        run: |
+          scripts/test-displays.sh
+          # Fails rather than skips: a package that was not started is a package
+          # that was not tested, and every packaging bug so far only appeared here.
+          DISPLAY=:31 HOPDESK_REQUIRE_PACKAGE=1 HOPDESK_HOST_DISPLAY=:31 HOPDESK_VIEWER_DISPLAY=:32 \
+            node --test --test-timeout=300000 apps/desktop/test/packaged.test.mjs
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: linux-packages
+          path: |
+            dist-packages/*.AppImage
+            dist-packages/*.deb
+          if-no-files-found: error
+
+  server-image:
+    name: Server container
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build the image
+        run: docker build -f server/docker/Dockerfile -t hopdesk-server:ci .
+      - name: Start it and check it answers
+        run: |
+          docker run -d --name hopdesk-ci -p 8787:8787 \
+            -e HOPDESK_TOKEN_SECRET="$(openssl rand -base64 48)" \
+            hopdesk-server:ci
+          for i in $(seq 1 30); do
+            curl -fsS http://127.0.0.1:8787/api/health && break
+            sleep 1
+          done
+          curl -fsS http://127.0.0.1:8787/api/health
+      - name: Check the Compose file
+        run: |
+          cd server/docker
+          cp .env.example .env
+          sed -i "s|^HOPDESK_TOKEN_SECRET=|HOPDESK_TOKEN_SECRET=$(openssl rand -base64 48)|" .env
+          sed -i "s|^HOPDESK_TURN_SECRET=|HOPDESK_TURN_SECRET=$(openssl rand -base64 32)|" .env
+          sed -i "s|^HOPDESK_PUBLIC_IP=|HOPDESK_PUBLIC_IP=203.0.113.10|" .env
+          docker compose config >/dev/null
+      - if: always()
+        run: docker rm -f hopdesk-ci || true
+
+  other-platforms:
+    name: ${{ matrix.os }} (builds and portable tests only)
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-2022, macos-14]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+      - run: npm ci
+      - run: npm run build
+      - run: npm run typecheck
+      - run: npm run lint
+
+      # The packages that are meant to work on every platform. On macOS this is
+      # a real check of the Quartz bindings; on both, of the protocol, the
+      # transport and the server.
+      #
+      # @hopdesk/core is left out on purpose: it is the VNC and RDP client, and
+      # its tests drive FreeRDP and a live VNC server through a Unix shell.
+      # Running it here would prove nothing and fail for the wrong reasons.
+      - name: Portable package tests
+        run: |
+          npm -w @hopdesk/crypto run test
+          npm -w @hopdesk/protocol run test
+          npm -w @hopdesk/transport run test
+          npm -w @hopdesk/platform run test
+          npm -w @hopdesk/server run test

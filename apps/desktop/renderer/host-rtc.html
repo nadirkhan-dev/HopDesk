@@ -1,0 +1,14 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta http-equiv="Content-Security-Policy"
+        content="default-src 'none'; script-src 'self'; style-src 'unsafe-inline'; img-src 'self' data:; media-src 'self' blob:; connect-src 'none'">
+  <title>HopDesk screen sharing</title>
+</head>
+<body>
+  <!-- No user interface: this window exists only to capture the screen and hold
+       the peer connection. It is never shown. -->
+  <script type="module" src="host-rtc.js"></script>
+</body>
+</html>

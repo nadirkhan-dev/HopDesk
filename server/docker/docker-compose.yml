@@ -1,0 +1,86 @@
+# Run your own HopDesk server.
+#
+#   1. cp .env.example .env
+#   2. edit .env: your domain, an email for the certificate, a token secret,
+#      a TURN secret and your server's public IP address
+#   3. docker compose up -d
+#
+# Caddy gets a TLS certificate for your domain automatically and passes requests
+# to the server. coturn is the relay for connections that cannot go direct; it
+# only ever forwards encrypted traffic.
+
+name: hopdesk
+
+services:
+  server:
+    build:
+      context: ../..
+      dockerfile: server/docker/Dockerfile
+    restart: unless-stopped
+    environment:
+      HOPDESK_TOKEN_SECRET: ${HOPDESK_TOKEN_SECRET:?set HOPDESK_TOKEN_SECRET in .env}
+      HOPDESK_REGISTRATION_OPEN: ${HOPDESK_REGISTRATION_OPEN:-false}
+      HOPDESK_REGISTRATION_TOKEN: ${HOPDESK_REGISTRATION_TOKEN:-}
+      HOPDESK_TRUST_PROXY: "true"
+      HOPDESK_TURN_SECRET: ${HOPDESK_TURN_SECRET:-}
+      HOPDESK_TURN_URLS: ${HOPDESK_TURN_URLS:-}
+      HOPDESK_STUN_URLS: ${HOPDESK_STUN_URLS:-stun:stun.l.google.com:19302}
+      HOPDESK_ACCESS_TTL_SECONDS: ${HOPDESK_ACCESS_TTL_SECONDS:-900}
+      HOPDESK_REFRESH_TTL_DAYS: ${HOPDESK_REFRESH_TTL_DAYS:-30}
+    volumes:
+      - hopdesk-data:/var/lib/hopdesk
+    # Not published directly: Caddy is the only way in.
+    expose:
+      - "8787"
+
+  caddy:
+    image: caddy:2-alpine
+    restart: unless-stopped
+    depends_on:
+      - server
+    environment:
+      HOPDESK_DOMAIN: ${HOPDESK_DOMAIN:?set HOPDESK_DOMAIN in .env}
+      HOPDESK_ACME_EMAIL: ${HOPDESK_ACME_EMAIL:?set HOPDESK_ACME_EMAIL in .env}
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy-data:/data
+      - caddy-config:/config
+
+  coturn:
+    image: coturn/coturn:4.6-alpine
+    restart: unless-stopped
+    # Host networking: a TURN relay needs a wide range of UDP ports and has to
+    # see real client addresses. On a VPS this is the arrangement that works.
+    network_mode: host
+    command:
+      - --no-cli
+      - --no-tlsv1
+      - --no-tlsv1_1
+      - --fingerprint
+      - --no-multicast-peers
+      # Credentials are HMACs of an expiry time, issued by the server from the
+      # same secret; there are no long-term TURN accounts to leak.
+      - --use-auth-secret
+      - --static-auth-secret=${HOPDESK_TURN_SECRET:?set HOPDESK_TURN_SECRET in .env}
+      - --realm=${HOPDESK_DOMAIN}
+      - --listening-port=3478
+      - --min-port=49160
+      - --max-port=49200
+      - --external-ip=${HOPDESK_PUBLIC_IP:?set HOPDESK_PUBLIC_IP in .env}
+      # A relay must not become a way into the private network around it.
+      - --denied-peer-ip=10.0.0.0-10.255.255.255
+      - --denied-peer-ip=172.16.0.0-172.31.255.255
+      - --denied-peer-ip=192.168.0.0-192.168.255.255
+      - --denied-peer-ip=169.254.0.0-169.254.255.255
+      - --denied-peer-ip=127.0.0.0-127.255.255.255
+      - --denied-peer-ip=::1
+      - --denied-peer-ip=fc00::-fdff:ffff:ffff:ffff:ffff:ffff:ffff:ffff
+      - --no-loopback-peers
+
+volumes:
+  hopdesk-data:
+  caddy-data:
+  caddy-config:

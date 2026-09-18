@@ -27,7 +27,9 @@ else
   echo "HOPDESK_HOMEPAGE is not set: building the AppImage only (a .deb needs a homepage URL)."
 fi
 
-npx --yes "electron-builder@${ELECTRON_BUILDER_VERSION}" \
+# --publish never: on a CI machine electron-builder otherwise tries to publish a
+# GitHub release and fails for want of a token. Releasing is a separate, deliberate act.
+npx --yes "electron-builder@${ELECTRON_BUILDER_VERSION}" --publish never \
   --config packaging/electron-builder.yml \
   --linux "${targets[@]}" "${extra[@]}"
 
