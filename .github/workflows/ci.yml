@@ -99,7 +99,7 @@ jobs:
           scripts/test-displays.sh
           # Fails rather than skips: a package that was not started is a package
           # that was not tested, and every packaging bug so far only appeared here.
-          HOPDESK_REQUIRE_PACKAGE=1 HOPDESK_HOST_DISPLAY=:31 HOPDESK_VIEWER_DISPLAY=:32 \
+          DISPLAY=:31 HOPDESK_REQUIRE_PACKAGE=1 HOPDESK_HOST_DISPLAY=:31 HOPDESK_VIEWER_DISPLAY=:32 \
             node --test --test-timeout=300000 apps/desktop/test/packaged.test.mjs
 
       - uses: actions/upload-artifact@v4
