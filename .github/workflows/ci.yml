@@ -31,11 +31,11 @@ jobs:
       - name: Install system dependencies
         run: |
           sudo apt-get update
-          # xvfb: virtual displays for the application tests.
+          # tigervnc-standalone-server: the X displays the application tests run
+          #   against, which also serve VNC for the protocol tests.
           # libxtst6: XTest, which the Host injects input through.
-          # tigervnc-standalone-server: a real VNC server for the client tests.
           sudo apt-get install -y --no-install-recommends \
-            xvfb libxtst6 libnss3 libasound2t64 libgtk-3-0t64 \
+            libxtst6 libnss3 libasound2t64 libgtk-3-0t64 \
             tigervnc-standalone-server x11-utils
 
       - run: npm ci
@@ -43,27 +43,22 @@ jobs:
       - run: npm run typecheck
       - run: npm run lint
 
-      - name: Package tests
-        run: npm run test:packages
-
-      - name: Start the displays the application tests use
+      - name: Start the displays and VNC servers the tests use
         run: |
-          # Two screens, because the tests connect one HopDesk to another.
-          Xvfb :31 -screen 0 1024x768x24 &
-          Xvfb :32 -screen 0 800x600x24 &
-          for display in 31 32; do
-            for i in $(seq 1 30); do
-              xdpyinfo -display ":$display" >/dev/null 2>&1 && break
-              sleep 0.5
-            done
-          done
+          # Two screens that also speak VNC: the application tests connect one
+          # HopDesk to another, and the protocol tests need a real VNC server.
+          scripts/test-displays.sh
           echo "DISPLAY=:31" >> "$GITHUB_ENV"
           echo "HOPDESK_HOST_DISPLAY=:31" >> "$GITHUB_ENV"
           echo "HOPDESK_VIEWER_DISPLAY=:32" >> "$GITHUB_ENV"
           echo "HOPDESK_TEST_DISPLAY=:31" >> "$GITHUB_ENV"
           echo "HOPDESK_X11_DISPLAY=:31" >> "$GITHUB_ENV"
-          # A suite that silently skips proves nothing; make missing displays fail.
+          # A suite that silently skips proves nothing: on Linux everything runs.
           echo "HOPDESK_REQUIRE_DISPLAY=1" >> "$GITHUB_ENV"
+          echo "HOPDESK_REQUIRE_VNC=1" >> "$GITHUB_ENV"
+
+      - name: Package tests
+        run: npm run test:packages
 
       - name: Application tests (two real HopDesk instances)
         run: npm run test:desktop
@@ -90,7 +85,8 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
-            xvfb libxtst6 libnss3 libasound2t64 libgtk-3-0t64 libfuse2t64
+            libxtst6 libnss3 libasound2t64 libgtk-3-0t64 libfuse2t64 \
+            tigervnc-standalone-server
 
       - name: Build the AppImage and the .deb
         env:
@@ -99,9 +95,7 @@ jobs:
 
       - name: Start the packaged app and connect two of them
         run: |
-          Xvfb :31 -screen 0 1024x768x24 &
-          Xvfb :32 -screen 0 800x600x24 &
-          sleep 3
+          scripts/test-displays.sh
           # Fails rather than skips: a package that was not started is a package
           # that was not tested, and every packaging bug so far only appeared here.
           HOPDESK_REQUIRE_PACKAGE=1 HOPDESK_HOST_DISPLAY=:31 HOPDESK_VIEWER_DISPLAY=:32 \
@@ -160,6 +154,18 @@ jobs:
       - run: npm run build
       - run: npm run typecheck
       - run: npm run lint
-      # The X11 input tests and the application tests skip themselves here:
-      # there is no X display, and no Host implementation for this platform.
-      - run: npm run test:packages
+
+      # The packages that are meant to work on every platform. On macOS this is
+      # a real check of the Quartz bindings; on both, of the protocol, the
+      # transport and the server.
+      #
+      # @hopdesk/core is left out on purpose: it is the VNC and RDP client, and
+      # its tests drive FreeRDP and a live VNC server through a Unix shell.
+      # Running it here would prove nothing and fail for the wrong reasons.
+      - name: Portable package tests
+        run: |
+          npm -w @hopdesk/crypto run test
+          npm -w @hopdesk/protocol run test
+          npm -w @hopdesk/transport run test
+          npm -w @hopdesk/platform run test
+          npm -w @hopdesk/server run test

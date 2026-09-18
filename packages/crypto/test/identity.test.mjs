@@ -64,16 +64,22 @@ test('access codes are six uniform digits, formatted and normalized', () => {
   for (const bad of ['73942', '7394211', '73942a', '']) assert.equal(normalizeAccessCode(bad), null);
 });
 
-test('file storage keeps the identity with private permissions and reloads it', async () => {
+test('file storage keeps the identity and reloads it', async () => {
   const dir = path.join(await mkdtemp(path.join(tmpdir(), 'hopdesk-id-')), 'secrets');
   const first = await loadOrCreateIdentity(new FileSecureStorage(dir));
   const again = await loadOrCreateIdentity(new FileSecureStorage(dir));
   assert.deepEqual(again.publicKey, first.publicKey);
-  assert.equal((await stat(dir)).mode & 0o777, 0o700);
   const file = path.join(dir, `${IDENTITY_SECRET_NAME}.secret`);
-  assert.equal((await stat(file)).mode & 0o777, 0o600);
   assert.deepEqual(await readdir(dir), [`${IDENTITY_SECRET_NAME}.secret`]);
   assert.equal(new FileSecureStorage(dir).osProtected, false);
+
+  /* On Unix the permission bits are the protection, so they are asserted.
+     Windows has no such bits; there the key is protected by the OS keystore
+     through safeStorage instead, and this check has nothing to say. */
+  if (process.platform !== 'win32') {
+    assert.equal((await stat(dir)).mode & 0o777, 0o700, 'the secrets directory is not private');
+    assert.equal((await stat(file)).mode & 0o777, 0o600, 'the key file is not private');
+  }
 });
 
 test('a protector encrypts at rest, and its secrets are not readable without it', async () => {

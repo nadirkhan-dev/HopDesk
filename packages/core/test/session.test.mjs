@@ -4,6 +4,38 @@ import { createServer, createConnection } from 'node:net';
 const netMod = { createConnection };
 import { Session, backoffDelay, DEFAULT_RECONNECT } from '../dist/index.js';
 
+/**
+ * Three of these tests need a real VNC server on 127.0.0.1:5901 with the
+ * password "testpass" — a live server is the only way to check that a wrong
+ * password is treated as final rather than retried, and that a dropped
+ * connection comes back.
+ *
+ *   scripts/test-displays.sh     starts one (and the displays the app tests use)
+ *
+ * Without it they skip, saying so. HOPDESK_REQUIRE_VNC=1 — which CI sets — turns
+ * that skip into a failure, because a check that quietly did not run is worth
+ * nothing.
+ */
+async function vncServerAvailable(port = 5901) {
+  return new Promise(resolve => {
+    const socket = createConnection({ host: '127.0.0.1', port });
+    const done = ok => { socket.destroy(); resolve(ok); };
+    socket.setTimeout(2000);
+    socket.on('connect', () => done(true));
+    socket.on('error', () => done(false));
+    socket.on('timeout', () => done(false));
+  });
+}
+
+const vncSkip = await (async () => {
+  if (await vncServerAvailable()) return false;
+  const reason = 'no VNC server on 127.0.0.1:5901 (run scripts/test-displays.sh)';
+  if (process.env.HOPDESK_REQUIRE_VNC === '1') {
+    throw new Error(`${reason} — and HOPDESK_REQUIRE_VNC=1 says these tests must run`);
+  }
+  return reason;
+})();
+
 const conn = (over = {}) => ({
   id: 'test', name: 'Test', protocol: 'vnc', host: '127.0.0.1', port: 5901,
   favorite: false, createdAt: '', updatedAt: '', connectCount: 0,
@@ -58,7 +90,7 @@ test('a refused connection ends in failed after exhausting attempts', async () =
   session.stop();
 });
 
-test('a wrong password does NOT retry — it is terminal', async () => {
+test('a wrong password does NOT retry — it is terminal', { skip: vncSkip }, async () => {
   // Retrying a bad password locks accounts on servers that count attempts.
   const session = new Session(conn({ port: 5901 }), 'definitely-wrong',
     { enabled: true, maxAttempts: 5, baseDelayMs: 100, maxDelayMs: 200 });
@@ -78,7 +110,7 @@ test('a wrong password does NOT retry — it is terminal', async () => {
   session.stop();
 });
 
-test('a deliberate stop does not trigger a reconnect', async () => {
+test('a deliberate stop does not trigger a reconnect', { skip: vncSkip }, async () => {
   const session = new Session(conn({ port: 5901 }), 'testpass', DEFAULT_RECONNECT);
   await new Promise(resolve => {
     session.on('state', s => { if (s === 'connected') resolve(); });
@@ -96,7 +128,7 @@ test('a deliberate stop does not trigger a reconnect', async () => {
   assert.ok(!after.includes('reconnecting'), 'reconnected after the user pressed Disconnect');
 });
 
-test('reconnects when the server drops mid-session', async () => {
+test('reconnects when the server drops mid-session', { skip: vncSkip }, async () => {
   /* A proxy in front of the real server, so the transport can be severed
      without killing the VNC server the rest of the suite uses. */
   const proxy = createServer(client => {
