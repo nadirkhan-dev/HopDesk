@@ -3,7 +3,6 @@
 # form of nested options changes between electron-builder releases.
 appId: io.hopdesk.HopDesk
 productName: HopDesk
-executableName: hopdesk
 directories:
   output: dist-packages
   buildResources: packaging
@@ -103,6 +102,9 @@ asarUnpack:
   - node_modules/@koromix/**
 
 linux:
+  # Lower case on Linux, where commands are; on a Mac the app keeps its name,
+  # HopDesk.app, rather than the "hopdesk.app" a global setting would give it.
+  executableName: hopdesk
   category: Network
   icon: packaging/icon.png
   maintainer: Nadir Khan <210738787+nadirkhan-dev@users.noreply.github.com>

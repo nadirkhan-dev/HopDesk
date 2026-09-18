@@ -76,6 +76,8 @@ jobs:
     # Apple Silicon builds both: the Intel one carries koffi's Intel module
     # (build-macos.sh installs it) and is tested under Rosetta.
     runs-on: macos-14
+    # A hung app must not hold a runner for hours.
+    timeout-minutes: 30
     strategy:
       fail-fast: true
       matrix:
@@ -126,7 +128,7 @@ jobs:
       - name: Start the installed app
         run: |
           HOPDESK_REQUIRE_PACKAGE=1 \
-            node --test --test-timeout=240000 apps/desktop/test/packaged-macos.test.mjs
+            node --test --test-timeout=360000 apps/desktop/test/packaged-macos.test.mjs
 
       - uses: actions/upload-artifact@v4
         with:

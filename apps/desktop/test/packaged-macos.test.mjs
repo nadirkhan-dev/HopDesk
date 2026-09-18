@@ -32,13 +32,15 @@ if (skip && process.env.HOPDESK_REQUIRE_PACKAGE === '1') {
 }
 
 test('the installed Mac app starts, lists what macOS allows it, and loads its input backend',
-  { skip, timeout: 180_000 }, async () => {
+  { skip, timeout: 300_000 }, async () => {
   // The bundle's own name for its executable, not an assumed one.
   const executable = execFileSync('/usr/libexec/PlistBuddy',
     ['-c', 'Print :CFBundleExecutable', path.join(appPath, 'Contents', 'Info.plist')], { encoding: 'utf8' }).trim();
   const app = await launchApp({
     binary: path.join(appPath, 'Contents', 'MacOS', executable),
     env: { HOPDESK_CREDENTIAL_BACKEND: 'file' },
+    // An Intel build on Apple Silicon is translated by Rosetta on its first launch.
+    startTimeoutMs: 150_000,
   });
   try {
     const href = await app.eval('return location.href');

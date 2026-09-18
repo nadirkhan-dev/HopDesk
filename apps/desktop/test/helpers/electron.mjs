@@ -36,7 +36,7 @@ export function electronUnavailableReason() {
  * point of the packaging test: the development build can be perfect while the
  * package is missing a dependency.
  */
-export async function launchApp({ binary, env = {}, dataDir } = {}) {
+export async function launchApp({ binary, env = {}, dataDir, startTimeoutMs = 20_000 } = {}) {
   const xdg = dataDir ?? await mkdtemp(path.join(tmpdir(), 'hopdesk-e2e-'));
 
   const childEnv = binary
@@ -62,8 +62,13 @@ export async function launchApp({ binary, env = {}, dataDir } = {}) {
   const child = spawn(executable, args, { env: childEnv, stdio: ['ignore', 'pipe', 'pipe'] });
 
   let output = '';
+  /* If it never gets as far as listening, what was started is stopped: left
+     running, it keeps this process alive and the test run never ends. */
   const port = await new Promise((resolve, reject) => {
-    const timer = setTimeout(() => reject(new Error(`Electron did not start:\n${output}`)), 20_000);
+    const timer = setTimeout(() => {
+      child.kill('SIGKILL');
+      reject(new Error(`Electron did not start within ${startTimeoutMs / 1000}s:\n${output}`));
+    }, startTimeoutMs);
     const scan = chunk => {
       output += chunk;
       const m = /DevTools listening on ws:\/\/127\.0\.0\.1:(\d+)\//.exec(output);
