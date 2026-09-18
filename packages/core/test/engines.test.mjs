@@ -12,9 +12,22 @@ const conn = (over = {}) => ({
   ...over,
 });
 
-test('FreeRDP is detected when installed', async () => {
+test('FreeRDP is found when it is installed, and its absence is reported plainly', async () => {
   const binary = await rdpAvailable();
-  assert.ok(binary, 'no FreeRDP binary found — RDP will not work on this machine');
+  /* Both answers are correct, depending on the machine — what must never
+     happen is a crash or a wrong answer. HOPDESK_REQUIRE_RDP=1, which CI sets
+     on Linux, insists that the positive case is the one being exercised, so
+     detection cannot quietly stop working. */
+  if (binary) {
+    assert.equal(typeof binary, 'string');
+    assert.match(binary, /freerdp/i, `detected something that is not FreeRDP: ${binary}`);
+  } else {
+    assert.equal(binary, null, 'absence must be reported as null, not as something falsy and odd');
+    if (process.env.HOPDESK_REQUIRE_RDP === '1') {
+      throw new Error('no FreeRDP binary found, and HOPDESK_REQUIRE_RDP=1 says there should be one '
+        + '(install freerdp2-x11 or freerdp3-x11)');
+    }
+  }
 });
 
 test('a missing SPICE viewer is reported, not crashed on', async () => {

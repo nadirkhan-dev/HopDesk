@@ -36,7 +36,7 @@ jobs:
           # libxtst6: XTest, which the Host injects input through.
           sudo apt-get install -y --no-install-recommends \
             libxtst6 libnss3 libasound2t64 libgtk-3-0t64 \
-            tigervnc-standalone-server x11-utils
+            tigervnc-standalone-server x11-utils freerdp2-x11
 
       - run: npm ci
       - run: npm run build
@@ -56,6 +56,7 @@ jobs:
           # A suite that silently skips proves nothing: on Linux everything runs.
           echo "HOPDESK_REQUIRE_DISPLAY=1" >> "$GITHUB_ENV"
           echo "HOPDESK_REQUIRE_VNC=1" >> "$GITHUB_ENV"
+          echo "HOPDESK_REQUIRE_RDP=1" >> "$GITHUB_ENV"
 
       - name: Package tests
         run: npm run test:packages

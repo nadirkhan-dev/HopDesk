@@ -30,14 +30,29 @@ try { new X11Input({ display }).close(); } catch (err) {
   else throw err;
 }
 
-/** Focus must be moved to the test window; XTest keys go to the focused window. */
-const X11 = koffi.load('libX11.so.6');
-// koffi type names are global, and the platform module already registered
-// "Display", so the handle is just an opaque pointer here.
-const XOpenDisplay = X11.func('void *XOpenDisplay(const char *name)');
-const XCloseDisplay = X11.func('int XCloseDisplay(void *dpy)');
-const XSetInputFocus = X11.func('int XSetInputFocus(void *dpy, unsigned long w, int revert_to, unsigned long time)');
-const XSync = X11.func('int XSync(void *dpy, int discard)');
+/**
+ * Focus has to be moved to the test window, because XTest sends keys wherever
+ * the focus is.
+ *
+ * Loaded on first use, not at import: the runner collects this file on every
+ * platform, and on one without libX11 — a Mac, a Windows runner — loading it at
+ * import throws before the file can decide to skip.
+ */
+let focus = null;
+function focusApi() {
+  if (!focus) {
+    // koffi type names are global, and the platform module already registered
+    // "Display", so the handle is just an opaque pointer here.
+    const lib = koffi.load('libX11.so.6');
+    focus = {
+      XOpenDisplay: lib.func('void *XOpenDisplay(const char *name)'),
+      XCloseDisplay: lib.func('int XCloseDisplay(void *dpy)'),
+      XSetInputFocus: lib.func('int XSetInputFocus(void *dpy, unsigned long w, int revert_to, unsigned long time)'),
+      XSync: lib.func('int XSync(void *dpy, int discard)'),
+    };
+  }
+  return focus;
+}
 
 function startXev() {
   const child = spawn('xev', { env: { ...process.env, DISPLAY: display }, stdio: ['ignore', 'pipe', 'pipe'] });

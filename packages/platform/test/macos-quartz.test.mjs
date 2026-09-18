@@ -105,11 +105,27 @@ test('the macOS backend refuses politely on other platforms', { skip: onMac ? 't
   assert.throws(() => loadQuartz(), /only available on macOS/);
 });
 
-test('importing the package does not load any system library', async () => {
-  /* The Host imports this on every platform, including ones with no X11 and no
-     Quartz. Loading a library at import time would crash the app before it
-     could say anything useful, so both backends load on first use. */
-  const source = await import('node:fs').then(fs => fs.readFileSync(new URL('../dist/linux/x11.js', import.meta.url), 'utf8'));
-  const topLevelLoad = /^koffi\.load|^const \w+ = koffi\.load/m.test(source);
-  assert.equal(topLevelLoad, false, 'x11.js loads a library at import time');
+test('nothing loads a system library at import time', async () => {
+  /* The Host imports this package on every platform, including ones with no
+     X11 and no Quartz, and the test runner collects every test file on every
+     platform too. A library loaded while a module is being imported takes the
+     whole file down before it can decide to skip — which is exactly how the
+     first macOS run failed, in a test rather than in the code it tests.
+     A column-zero `koffi.load` is that mistake, and this is the check that
+     catches it without needing the platform that would suffer from it. */
+  const { readFileSync, readdirSync } = await import('node:fs');
+  const files = [
+    ...readdirSync(new URL('../dist/linux', import.meta.url)).map(f => `../dist/linux/${f}`),
+    ...readdirSync(new URL('../dist/macos', import.meta.url)).map(f => `../dist/macos/${f}`),
+    ...readdirSync(new URL('.', import.meta.url)).map(f => `./${f}`),
+  ].filter(f => f.endsWith('.js') || f.endsWith('.mjs'));
+
+  const offenders = files.filter(file => {
+    const source = readFileSync(new URL(file, import.meta.url), 'utf8');
+    // At column zero, or assigned to a top-level binding: both run on import.
+    return /^\s{0,2}(const|let|var)\s+\w+\s*=\s*koffi\.load\(/m.test(source)
+      || /^koffi\.load\(/m.test(source);
+  });
+  assert.deepEqual(offenders, [], `these load a system library at import: ${offenders.join(', ')}`);
+  assert.ok(files.length >= 6, `expected to have checked more files than ${files.length}`);
 });
