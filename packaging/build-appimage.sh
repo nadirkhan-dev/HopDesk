@@ -16,15 +16,12 @@ npm run build
 # VS Code's integrated terminal sets this, and it breaks Electron tooling.
 unset ELECTRON_RUN_AS_NODE
 
-# Debian packages must name a project homepage. There is no official one, so the
-# .deb is built only when you supply it; the AppImage needs none.
+# Debian packages must name a homepage; electron-builder.yml sets the project's.
+# HOPDESK_HOMEPAGE overrides it, for a fork that publishes its own packages.
+targets=(AppImage deb)
+extra=()
 if [[ -n "${HOPDESK_HOMEPAGE:-}" ]]; then
-  targets=(AppImage deb)
   extra=(--config.extraMetadata.homepage="${HOPDESK_HOMEPAGE}")
-else
-  targets=(AppImage)
-  extra=()
-  echo "HOPDESK_HOMEPAGE is not set: building the AppImage only (a .deb needs a homepage URL)."
 fi
 
 # --publish never: on a CI machine electron-builder otherwise tries to publish a

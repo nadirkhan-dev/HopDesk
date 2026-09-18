@@ -18,10 +18,11 @@ afterPack: packaging/after-pack.cjs
 extraMetadata:
   main: apps/desktop/dist/main.js
   type: module
-  description: A remote desktop client for Linux
+  description: Remote desktop by Device ID and access code, on your LAN or through your own server; also a VNC and RDP client
+  homepage: https://github.com/nadirkhan-dev/HopDesk
   author:
-    name: HopDesk contributors
-    email: hopdesk@users.noreply.github.com
+    name: Nadir Khan
+    email: 210738787+nadirkhan-dev@users.noreply.github.com
 
 files:
   - package.json
@@ -104,13 +105,14 @@ asarUnpack:
 linux:
   category: Network
   icon: packaging/icon.png
-  maintainer: HopDesk contributors <hopdesk@users.noreply.github.com>
-  synopsis: Remote desktop client for VNC, RDP and SPICE
+  maintainer: Nadir Khan <210738787+nadirkhan-dev@users.noreply.github.com>
+  vendor: Nadir Khan <210738787+nadirkhan-dev@users.noreply.github.com>
+  synopsis: Remote desktop by Device ID and access code
   desktop:
     entry:
       Name: HopDesk
-      GenericName: Remote Desktop Client
-      Keywords: remote;desktop;vnc;rdp;spice;
+      GenericName: Remote Desktop
+      Keywords: remote;desktop;screen;sharing;support;vnc;rdp;
       StartupWMClass: HopDesk
 
 # macOS. Untested: no Mac has built this yet — see packaging/build-macos.sh.

@@ -90,8 +90,6 @@ jobs:
             tigervnc-standalone-server
 
       - name: Build the AppImage and the .deb
-        env:
-          HOPDESK_HOMEPAGE: https://github.com/hopdesk/hopdesk
         run: bash packaging/build-appimage.sh
 
       - name: Start the packaged app and connect two of them

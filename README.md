@@ -412,14 +412,16 @@ HOPDESK_RDP_NLA_TEST='127.0.0.1:13390:nlauser:NlaPass!45' npm test
 ### Packages
 
 ```bash
-./packaging/build-appimage.sh                                      # AppImage → dist-packages/
-HOPDESK_HOMEPAGE=https://your.project.page ./packaging/build-appimage.sh   # AppImage and .deb
+./packaging/build-appimage.sh                # AppImage and .deb → dist-packages/
 flatpak-builder --user --install-deps-from=flathub --install build packaging/io.hopdesk.HopDesk.yml
 ```
 
 * The build script runs a pinned electron-builder through `npx` and never
-  changes `package.json`. A `.deb` must name a project homepage; there is no
-  official one, so it is built only when `HOPDESK_HOMEPAGE` is set.
+  changes `package.json`. `HOPDESK_HOMEPAGE` overrides the homepage the `.deb`
+  names, for a fork publishing its own packages.
+* Pushing a tag such as `v0.2.0` builds both packages, starts two of them and
+  connects them, and only then attaches them to a GitHub release
+  (`.github/workflows/release.yml`).
 * The Flatpak builds offline on the Freedesktop 25.08 runtime, with FreeRDP
   3.31.1 compiled in (checksum from the release's published `.sha256`). npm packages and Electron come from
   `packaging/generated-sources.json`; regenerate it with `flatpak-node-generator

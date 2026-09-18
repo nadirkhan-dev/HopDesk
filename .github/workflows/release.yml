@@ -46,10 +46,6 @@ jobs:
             tigervnc-standalone-server
 
       - name: Build the AppImage and the .deb
-        env:
-          # Debian packages must name a homepage, and build-appimage.sh builds
-          # the .deb only when one is supplied.
-          HOPDESK_HOMEPAGE: https://github.com/${{ github.repository }}
         run: bash packaging/build-appimage.sh
 
       - name: Start the packaged app and connect two of them
@@ -95,6 +91,10 @@ jobs:
 
           Both packages were built and then started on a real X display, with two
           packaged copies connecting to each other, before this release was created.
+
+          Hosting from a Linux Xorg session has also been used on real hardware:
+          connecting by Device ID and access code, the Allow prompt, the live
+          desktop, and mouse and keyboard.
 
           ## What is not
 
