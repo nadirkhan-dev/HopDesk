@@ -235,7 +235,7 @@ export function initHopdesk({ api, toast, confirmDialog }) {
         toast('Remote access is off. No one can connect to this computer.');
       }
     } catch (err) {
-      toast(err.message);
+      toast(friendlyError(err.message));
     }
   };
 
@@ -353,7 +353,7 @@ export function initHopdesk({ api, toast, confirmDialog }) {
           `${computer.name} will no longer be reachable through this account until it signs in again.`, 'Remove'))) return;
         try {
           renderAccount(await api.accountRemoveComputer(computer.deviceId));
-        } catch (err) { toast(err.message); }
+        } catch (err) { toast(friendlyError(err.message)); }
       };
       row.append(dot, name, connect, remove);
       list.append(row);
@@ -362,7 +362,7 @@ export function initHopdesk({ api, toast, confirmDialog }) {
 
   api.onAccountState?.(renderAccount);
   $('#mc-refresh').onclick = async () => {
-    try { renderAccount(await api.accountRefresh()); } catch (err) { toast(err.message); }
+    try { renderAccount(await api.accountRefresh()); } catch (err) { toast(friendlyError(err.message)); }
   };
   $('#mc-signout').onclick = async () => {
     if (!(await confirmDialog('Sign out of this HopDesk server?',
@@ -430,12 +430,16 @@ export function initHopdesk({ api, toast, confirmDialog }) {
   };
 
   const showConnectError = message => {
-    const box = $('#cd-error');
-    box.textContent = friendlyError(message);
-    box.hidden = false;
+    const clean = cleanMessage(message);
+    const friendly = friendlyError(clean);
+    $('#cd-error').textContent = friendly;
+    $('#cd-error').hidden = false;
+    /* The raw text only when it says something the sentence above does not.
+       Shown otherwise, it reads as an error about an error. */
     const detail = $('#cd-error-detail');
-    detail.textContent = message;
-    detail.hidden = false;
+    const worthShowing = friendly === clean && clean.length > 0;
+    detail.textContent = worthShowing ? clean : '';
+    detail.hidden = !worthShowing;
   };
 
   api.onDeviceSession?.(status => {
@@ -765,8 +769,21 @@ export function initHopdesk({ api, toast, confirmDialog }) {
 const formatCode = code => (code.length === 6 ? `${code.slice(0, 3)} ${code.slice(3)}` : code);
 
 /** Handshake failures in plain words; the technical text stays available. */
-function friendlyError(message) {
-  const text = String(message);
+/**
+ * Electron puts its own wrapper round anything an IPC call throws, and the
+ * protocol's own errors are codes rather than sentences. Neither belongs in
+ * front of a person: "Error invoking remote method 'connectDevice':
+ * HandshakeError: unknown-device" is what this strips back to "unknown-device".
+ */
+export function cleanMessage(message) {
+  return String(message ?? '')
+    .replace(/^Error invoking remote method '[^']*':\s*/, '')
+    .replace(/^(?:[A-Za-z]*Error):\s*/, '')
+    .trim();
+}
+
+export function friendlyError(message) {
+  const text = cleanMessage(message);
   if (/bad-auth|access code is not correct/i.test(text)) return 'That access code is not correct. Check the code shown on the other computer — it changes.';
   if (/rate-limited/i.test(text)) return 'Too many attempts were refused. Wait a moment, then try the new code shown on the other computer.';
   if (/not-found|No computer with the Device ID/i.test(text)) return 'No computer with that Device ID answered on this network. Check the ID, or that HopDesk is open and remote access is on there.';

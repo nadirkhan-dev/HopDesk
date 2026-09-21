@@ -1,6 +1,7 @@
 import { test } from 'node:test';
+import { networkInterfaces } from 'node:os';
 import assert from 'node:assert/strict';
-import { HopdeskAnnouncer, findHosts, HOPDESK_SERVICE, parseMdns } from '../dist/index.js';
+import { HopdeskAnnouncer, findHosts, HOPDESK_SERVICE, parseMdns, discoveryAddresses } from '../dist/index.js';
 import { decodeMessage } from '@hopdesk/core';
 
 /**
@@ -115,3 +116,15 @@ async function ask(targetPort, { skipQuery = false } = {}) {
   if (!skipQuery) send(buildQuery(HOPDESK_SERVICE));
   return { promise, socket, send };
 }
+
+test('a query is asked from every network this computer is on', () => {
+  /* One multicast packet leaves by whichever interface the routing table
+     prefers. On a machine with Docker bridges or a VPN that is often not the
+     network the other computer is on — which is how a Mac stayed invisible
+     while TCP to it worked. */
+  const addresses = discoveryAddresses();
+  const own = Object.values(networkInterfaces()).flat()
+    .filter(e => e && e.family === 'IPv4' && !e.internal).map(e => e.address);
+  assert.deepEqual([...addresses].sort(), [...own].sort());
+  assert.ok(!addresses.includes('127.0.0.1'), 'loopback is not a network to look for computers on');
+});

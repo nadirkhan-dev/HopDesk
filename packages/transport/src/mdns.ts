@@ -297,6 +297,13 @@ export interface FindOptions {
   target?: { address: string; port: number };
   /** Stop as soon as this Device ID answers. */
   deviceId?: string;
+  /**
+   * Which local addresses to ask from. The default is every IPv4 address this
+   * computer has, because one multicast packet leaves by whichever interface
+   * the routing table prefers — which on a machine with Docker bridges or a
+   * VPN is often not the one the other computer is on.
+   */
+  sendFrom?: string[];
 }
 
 /** One-shot query for HopDesk computers on this network. */
@@ -335,9 +342,38 @@ export function findHosts(opts: FindOptions = {}): Promise<DiscoveredHost[]> {
     });
     socket.bind(0, () => {
       const query = message({ response: false, questions: [question(HOPDESK_SERVICE, TYPE_PTR), question(HOPDESK_SERVICE, TYPE_ANY)] });
-      socket.send(query, target.port, target.address, err => { if (err) finish(); });
+      const multicast = target.address === MDNS_GROUP;
+      const from = multicast ? (opts.sendFrom ?? discoveryAddresses()) : [];
+      let sent = 0;
+      let failed = 0;
+      const attempt = () => {
+        socket.send(query, target.port, target.address, err => {
+          if (err) failed++;
+          if (++sent >= attempts && failed === attempts) finish();   // nothing left
+        });
+      };
+      /* Once per interface, so a query reaches the network the other computer
+         is actually on, and once more however the routing table would send it. */
+      const attempts = from.length + 1;
+      for (const address of from) {
+        try { socket.setMulticastInterface(address); } catch { /* not a multicast interface */ }
+        attempt();
+      }
+      try { socket.setMulticastInterface('0.0.0.0'); } catch { /* the default route it is */ }
+      attempt();
     });
   });
+}
+
+/** Every IPv4 address this computer has, except loopback and the like. */
+export function discoveryAddresses(): string[] {
+  const out: string[] = [];
+  for (const list of Object.values(networkInterfaces())) {
+    for (const entry of list ?? []) {
+      if (entry.family === 'IPv4' && !entry.internal) out.push(entry.address);
+    }
+  }
+  return out;
 }
 
 function collect(records: ParsedRecord[]): DiscoveredHost[] {

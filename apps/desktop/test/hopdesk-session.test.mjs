@@ -555,6 +555,88 @@ test('the edges of the other computer\'s screen are reachable, letterboxed or no
   }
 });
 
+test('full screen, the hiding toolbar, the scaling modes and the remote pointer',
+  { skip, timeout: 180_000 }, async () => {
+  const host = await startHost();
+  const viewer = await startViewer();
+  try {
+    await connect(viewer, host);
+    await host.waitFor(`return document.querySelector('#dlg-consent')?.open === true`, 25_000, 'the Allow prompt');
+    await allow(host);
+    await viewer.waitFor(`const v = document.querySelector('#hd-video'); return v.videoWidth > 0 && v.readyState >= 2`,
+      45_000, 'video');
+
+    /* Full screen needs a real user gesture, exactly as the button is. It used
+       to be refused outright, and Chromium leaves a refused request pending
+       for ever, so the button did nothing at all. */
+    const gesture = async expression => {
+      const res = await viewer.cdp.send('Runtime.evaluate', {
+        expression: `(async () => { ${expression} })()`, awaitPromise: true, returnByValue: true, userGesture: true,
+      });
+      if (res.exceptionDetails) throw new Error(res.exceptionDetails.text);
+      return res.result?.value;
+    };
+    const entered = await gesture(`
+      document.querySelector('#hd-fullscreen').click();
+      await new Promise(r => setTimeout(r, 600));
+      return { fullscreen: !!document.fullscreenElement,
+               immersive: document.querySelector('#hd-view').classList.contains('immersive'),
+               label: document.querySelector('#hd-fullscreen').textContent };`);
+    assert.equal(entered.fullscreen, true, 'the Fullscreen button did nothing');
+    assert.equal(entered.immersive, true, 'the session view is not in its full screen layout');
+    assert.match(entered.label, /Leave full screen/);
+
+    /* The toolbar gets out of the way, and comes back at the top edge. */
+    const hides = await viewer.eval(`
+      await new Promise(r => setTimeout(r, 2800));
+      return document.querySelector('#hd-view').classList.contains('peek');`);
+    assert.equal(hides, false, 'the toolbar never hid itself');
+    const peeks = await viewer.eval(`
+      document.querySelector('#hd-view').dispatchEvent(new MouseEvent('mousemove', { clientX: 200, clientY: 1, bubbles: true }));
+      return document.querySelector('#hd-view').classList.contains('peek');`);
+    assert.equal(peeks, true, 'the toolbar did not come back at the top edge');
+
+    await gesture(`await document.exitFullscreen(); await new Promise(r => setTimeout(r, 400));
+      return !document.fullscreenElement;`);
+    assert.equal(await viewer.eval(`return document.querySelector('#hd-view').classList.contains('immersive')`), false);
+
+    /* Fit, Fill and 1:1 reach the picture as well as the pointer mapping. */
+    for (const mode of ['fill', 'actual', 'fit']) {
+      const applied = await viewer.eval(`
+        const select = document.querySelector('#hd-scale');
+        select.value = ${JSON.stringify('MODE')}.replace('MODE', ${JSON.stringify(mode)});
+        select.dispatchEvent(new Event('change'));
+        const v = document.querySelector('#hd-video');
+        return { classes: [...v.classList], fit: getComputedStyle(v).objectFit };`);
+      assert.ok(applied.classes.includes(mode) || mode === 'fit', `${mode} was not applied: ${applied.classes}`);
+      if (mode === 'fill') assert.equal(applied.fit, 'cover');
+      if (mode === 'actual') assert.equal(applied.fit, 'none');
+      if (mode === 'fit') assert.equal(applied.fit, 'contain');
+    }
+
+    /* The other computer's pointer is drawn here, because a Mac does not put
+       its cursor in the video and the mouse would otherwise look dead. */
+    const box = await viewer.eval(`
+      const r = document.querySelector('#hd-video').getBoundingClientRect();
+      return { left: r.left, top: r.top, width: r.width, height: r.height }`);
+    await viewer.cdp.send('Input.dispatchMouseEvent', {
+      type: 'mouseMoved', x: box.left + box.width * 0.5, y: box.top + box.height * 0.5,
+    });
+    const cursor = await waitFor(async () => {
+      const state = await viewer.eval(`
+        const c = document.querySelector('#hd-cursor');
+        return { hidden: c.hidden, left: parseFloat(c.style.left || '0'), top: parseFloat(c.style.top || '0'),
+                 localHidden: document.querySelector('#hd-stage').classList.contains('controlling') };`);
+      return state.hidden ? null : state;
+    }, 10_000, 'the remote pointer to be drawn');
+    assert.equal(cursor.localHidden, true, 'the local cursor is still shown over the picture');
+    assert.ok(cursor.left > 0 && cursor.top > 0, `the drawn pointer is at ${cursor.left},${cursor.top}`);
+  } finally {
+    await viewer.close();
+    await host.close();
+  }
+});
+
 /* --------------------------------------------------------------- helpers */
 
 /** A TCP proxy whose connections the test can destroy on demand. */
