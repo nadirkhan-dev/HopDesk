@@ -50,6 +50,10 @@ interface Bindings {
   CGEventSetFlags: (event: unknown, flags: number) => void;
   CGEventKeyboardSetUnicodeString: (event: unknown, length: number, text: Uint16Array) => void;
   CGMainDisplayID: () => number;
+  /** macOS 10.15+: is screen recording allowed? Never prompts. */
+  CGPreflightScreenCaptureAccess: () => boolean;
+  /** macOS 10.15+: shows Apple's own prompt, once, and lists the app in Settings. */
+  CGRequestScreenCaptureAccess: () => boolean;
   CGDisplayPixelsWide: (display: number) => number;
   CGDisplayPixelsHigh: (display: number) => number;
   CFRelease: (ref: unknown) => void;
@@ -86,6 +90,8 @@ export function loadQuartz(): Bindings {
     CGEventSetFlags: cg.func('void CGEventSetFlags(void *event, uint64_t flags)') as Bindings['CGEventSetFlags'],
     CGEventKeyboardSetUnicodeString: cg.func('void CGEventKeyboardSetUnicodeString(void *event, uint32_t length, uint16_t *string)') as Bindings['CGEventKeyboardSetUnicodeString'],
     CGMainDisplayID: cg.func('uint32_t CGMainDisplayID()') as Bindings['CGMainDisplayID'],
+    CGPreflightScreenCaptureAccess: cg.func('bool CGPreflightScreenCaptureAccess()') as Bindings['CGPreflightScreenCaptureAccess'],
+    CGRequestScreenCaptureAccess: cg.func('bool CGRequestScreenCaptureAccess()') as Bindings['CGRequestScreenCaptureAccess'],
     CGDisplayPixelsWide: cg.func('size_t CGDisplayPixelsWide(uint32_t display)') as Bindings['CGDisplayPixelsWide'],
     CGDisplayPixelsHigh: cg.func('size_t CGDisplayPixelsHigh(uint32_t display)') as Bindings['CGDisplayPixelsHigh'],
     CFRelease: cf.func('void CFRelease(void *ref)') as Bindings['CFRelease'],
@@ -263,6 +269,27 @@ const US_LAYOUT: Record<string, number> = {
   i: 0x22, p: 0x23, l: 0x25, j: 0x26, "'": 0x27, k: 0x28, ';': 0x29, '\\': 0x2a,
   ',': 0x2b, '/': 0x2c, n: 0x2d, m: 0x2e, '.': 0x2f, '`': 0x32,
 };
+
+/**
+ * Asks macOS for Screen Recording, which Electron cannot do (its
+ * `askForMediaAccess` covers only the microphone and camera).
+ *
+ * macOS shows this prompt **once per app**. After that the call returns false
+ * immediately without showing anything, and the only way left is System
+ * Settings — which is why the caller must always offer that path too. Either
+ * way the app is added to the list, so nobody has to find it with the + button.
+ */
+export function requestScreenRecording(): { granted: boolean; prompted: boolean } {
+  const q = loadQuartz();
+  if (q.CGPreflightScreenCaptureAccess()) return { granted: true, prompted: false };
+  const granted = q.CGRequestScreenCaptureAccess();
+  return { granted, prompted: true };
+}
+
+/** Whether screen recording is allowed, without showing anything. */
+export function screenRecordingAllowed(): boolean {
+  return loadQuartz().CGPreflightScreenCaptureAccess();
+}
 
 export function usLayoutKeyCode(text: string): number | null {
   const code = US_LAYOUT[text.toLowerCase()];

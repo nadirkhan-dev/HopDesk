@@ -116,11 +116,14 @@ A few details worth knowing:
   address.
 * **If the connection drops**, it comes back by itself without asking anyone
   again. If the person at the other computer disconnects, it does not.
-* **Unattended access** (Settings → *Letting others connect to this computer*)
-  lets a computer be reached with a password and nobody there to allow it. It is
-  off, needs its own password of at least eight characters, and asks for
-  confirmation before it is switched on. The password is never stored: what is
-  kept cannot be used as the password anywhere else.
+* **Pair once, then one click.** When you allow a connection, the prompt offers
+  *Let this computer connect again without asking*. Tick it and that computer
+  appears under **Saved computers** on the other side: one click, no access
+  code, and nobody has to answer anything — even with nobody sitting there.
+  What is stored is the other computer's public key, which cannot be used by
+  anyone who copies it, and a pairing expires after 90 days unless it is used.
+  *Computers you trust*, under **This computer**, lists them and stops any of
+  them; stopping one also disconnects it if it is connected at that moment.
 
 ## Run your own HopDesk server
 
@@ -166,7 +169,7 @@ server address, tick *Create a new account* the first time, and paste the
 registration token when it asks. Do the same on
 your other computers. Each one then appears under **My computers**, and one
 click connects — the person at the other end is still asked to allow it, unless
-that computer has unattended access switched on.
+the two computers have been paired.
 
 Signing out on a computer removes it from the account, so it can no longer be
 reached through the server.
@@ -257,6 +260,16 @@ When something goes wrong HopDesk says what to check — *Wrong username or
 password*, *Connection refused*, *Certificate changed* — and keeps the
 technical details under *Technical details* and in the log (*Settings →
 Diagnostics*).
+
+### A session with another HopDesk computer
+
+| | |
+|---|---|
+| **Full screen** | The *Fullscreen* button or **F11**. **Ctrl+Alt+Enter** leaves — a way out that no remote application wants, because in full screen even Cmd and Alt+Tab go to the other computer. The toolbar hides itself; touch the top edge to bring it back. |
+| **Screen size** | *Fit* shows the whole screen, letterboxed rather than cropped. *Fill* fills the window and crops. *1:1* is one remote pixel per pixel here, drawn sharp, which is what to use for a Retina Mac. |
+| **The pointer** | The other computer's pointer is drawn over the picture, because macOS does not include its cursor in what it shares. Every part of that screen is reachable, including the very edges, so a Mac's Dock, its menu bar and its hot corners work. |
+| **Keys** | The Super (Windows) key is Cmd on a Mac. In full screen, HopDesk holds the keyboard so shortcuts reach the other computer instead of this desktop. |
+| **Clipboard** | Text copied on either side is available on the other. |
 
 ## Security
 

@@ -25,6 +25,7 @@ import { ViewerRole } from './viewer.js';
 import { openInputController, linuxBackend, type InputController } from '@hopdesk/platform';
 import { createPermissionManager, openPermissionSettings, type PermissionReport } from './permissions.js';
 import { TrustedDevices } from './trusted.js';
+import { BackgroundMode, openAtLogin, setOpenAtLogin } from './background.js';
 import { viewerNotices } from './permission-report.js';
 import {
   MAX_CLIPBOARD_CHARS, type ConsentDecision, type ConsentRequest,
@@ -105,6 +106,15 @@ interface ActiveSession {
 }
 let active: ActiveSession | null = null;
 
+let background: BackgroundMode | null = null;
+
+/** Brings the window back, creating it again if it was closed. */
+function showWindow() {
+  if (!window || window.isDestroyed()) { createWindow(); return; }
+  if (!window.isVisible()) window.show();
+  window.focus();
+}
+
 function createWindow() {
   // Never larger than the screen it opens on.
   const work = screen.getPrimaryDisplay().workAreaSize;
@@ -125,6 +135,13 @@ function createWindow() {
   });
 
   window.loadFile(UI_FILE);
+  /* Closing the window does not stop this computer being reachable: it hides,
+     and the menu bar item stays. Quitting from there ends every session. */
+  window.on('close', event => {
+    if (!background?.shouldHideOnClose()) return;
+    event.preventDefault();
+    window?.hide();
+  });
   window.on('closed', () => { window = null; });
   Menu.setApplicationMenu(null);
 }
@@ -417,7 +434,10 @@ function createRoles(identity: LocalIdentity) {
     shareClipboard: () => settings.get().defaults.shareClipboard !== false,
   });
   // The whole status, permissions included: a partial one would blank them in the window.
-  hostRole.on('change', () => send('hostStatus', hostStatusPayload()));
+  hostRole.on('change', () => {
+    send('hostStatus', hostStatusPayload());
+    background?.refresh();
+  });
   hostRole.on('clipboard', (sessionId: string, message: unknown) => {
     rtc.post(sessionId, 'host:send', { sessionId, label: 'clipboard', message });
   });
@@ -565,7 +585,38 @@ app.whenReady().then(async () => {
   }
 
   createWindow();
-  app.on('activate', () => { if (!BrowserWindow.getAllWindows().length) createWindow(); });
+  app.on('activate', () => {
+    if (!BrowserWindow.getAllWindows().length) createWindow();
+    else showWindow();
+  });
+
+  /* The menu bar item, and staying alive without a window. macOS only: on
+     Linux the app is started when it is wanted, and a tray icon there would be
+     a second way to lose track of what is running. */
+  if (process.platform === 'darwin') {
+    background = new BackgroundMode({
+      show: showWindow,
+      status: () => (host ? host.status() : hostUnavailable()),
+      setRemoteAccess: async enabled => {
+        if (!host) return;
+        await settings.update({ remoteAccess: { enabled } });
+        if (enabled) await host.start(); else await host.stop();
+        send('hostStatus', hostStatusPayload());
+        background?.refresh();
+      },
+      endSession: id => { host?.endSession(id, 'user-disconnected'); },
+      quit: () => app.quit(),
+      log: line => log.info(line),
+      /* Waking from sleep: the network may have changed underneath a listener
+         that still thinks it is bound. Starting an already-started host is a
+         no-op, so this only repairs the case where it stopped. */
+      onWake: () => {
+        if (!host || !settings.get().remoteAccess.enabled) return;
+        void host.start().catch(err => log.warn(`could not resume remote access after waking: ${(err as Error).message}`));
+      },
+    });
+    background.start();
+  }
 
   /* On a Mac, what the system allows is shown from the start — not only after
      remote access is switched on — and checked again whenever HopDesk comes
@@ -606,6 +657,7 @@ function shutdown(): Promise<void> {
     account?.close();
     await host?.stop();
     // Closing the controller also hands back the Wayland portal session.
+    background?.stop();
     inputController?.close();
     inputController = null;
     credentials.lock();
@@ -618,6 +670,8 @@ function shutdown(): Promise<void> {
 }
 
 app.on('window-all-closed', () => {
+  // On a Mac the app lives on in the menu bar; everywhere else this is the end.
+  if (background?.shouldHideOnClose()) return;
   void shutdown().then(() => app.quit());
 });
 // Quitting is held back until the shutdown has finished, however it started
@@ -1085,6 +1139,20 @@ handle('relaunch', () => {
 });
 
 handle('checkPermissions', () => refreshPermissions(false));
+
+/**
+ * Asks macOS for one permission with its own dialog. macOS shows each prompt
+ * once; `prompted: false` with `granted: false` means it decided not to, and
+ * the wizard must send the person to System Settings instead.
+ */
+handle('askPermission', async (id: string) => {
+  const which = id === 'accessibility' ? 'accessibility' : 'screen-recording';
+  const result = await permissions.ask?.(which) ?? { granted: false, prompted: false };
+  log.info(`asked macOS for ${which}: ${result.granted ? 'allowed' : result.prompted ? 'prompt shown' : 'no prompt (already answered once)'}`);
+  await refreshPermissions(false);
+  permissionsChanged();
+  return { ...result, report: permissionReport };
+});
 handle('requestPermissions', () => refreshPermissions(true));
 handle('openPermissionSettings', (action: string) => {
   openPermissionSettings(action as PermissionReport['action']);
@@ -1142,6 +1210,17 @@ handle('answerConsent', (id: string, decision: string) => {
 });
 
 handle('trustedList', () => (host ? host.status().trusted : []));
+
+/* Opening at login is what makes a Mac reachable after a restart without
+   anyone opening the app. A user login item: it runs after *this* person logs
+   in, so a computer with nobody logged in stays unreachable. */
+handle('loginItem', () => ({ supported: process.platform === 'darwin', openAtLogin: openAtLogin() }));
+handle('setLoginItem', (open: boolean) => {
+  setOpenAtLogin(Boolean(open));
+  const now = openAtLogin();
+  log.info(`open at login: ${now ? 'on' : 'off'}`);
+  return { openAtLogin: now };
+});
 
 handle('trustedRemove', (deviceId: string) => {
   if (!host) throw new Error('This computer has no HopDesk identity yet');

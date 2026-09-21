@@ -1,6 +1,7 @@
 import { shell, systemPreferences } from 'electron';
 import type { PermissionManager, PermissionState } from '@hopdesk/platform';
 import { macReport, type PermissionReport } from './permission-report.js';
+import { requestScreenRecording, screenRecordingAllowed } from '@hopdesk/platform';
 
 /**
  * What the operating system has to allow before this computer can be shared.
@@ -22,6 +23,8 @@ export type { PermissionReport } from './permission-report.js';
 interface Permissions extends PermissionManager {
   check(): Promise<PermissionReport>;
   request(): Promise<PermissionReport>;
+  /** Shows the operating system's own prompt, where there is one. */
+  ask?(id: 'screen-recording' | 'accessibility'): Promise<{ granted: boolean; prompted: boolean }>;
 }
 
 const SCREEN_RECORDING_PANE = 'x-apple.systempreferences:com.apple.preference.security?Privacy_ScreenCapture';
@@ -33,6 +36,28 @@ class MacPermissions implements Permissions {
     return macReport(
       toState(systemPreferences.getMediaAccessStatus('screen')),
       systemPreferences.isTrustedAccessibilityClient(false) ? 'granted' : 'prompt');
+  }
+
+  /**
+   * Asks macOS itself for one permission, so its own dialog appears and HopDesk
+   * lands in the Settings list without anyone hunting for it with +.
+   *
+   * `prompted: false` means macOS decided not to show anything — it only ever
+   * asks once — so the caller should fall back to opening System Settings.
+   */
+  async ask(id: 'screen-recording' | 'accessibility'): Promise<{ granted: boolean; prompted: boolean }> {
+    if (id === 'accessibility') {
+      if (systemPreferences.isTrustedAccessibilityClient(false)) return { granted: true, prompted: false };
+      // `true` is AXIsProcessTrustedWithOptions with the prompt option.
+      const granted = systemPreferences.isTrustedAccessibilityClient(true);
+      return { granted, prompted: !granted };
+    }
+    try {
+      return requestScreenRecording();
+    } catch {
+      // Quartz could not be loaded: the Settings route still works.
+      return { granted: screenRecordingSafe(), prompted: false };
+    }
   }
 
   async request(): Promise<PermissionReport> {
@@ -65,6 +90,10 @@ export function createPermissionManager(): Permissions {
 export function openPermissionSettings(action: PermissionReport['action']) {
   if (action === 'open-screen-recording') void shell.openExternal(SCREEN_RECORDING_PANE);
   if (action === 'open-accessibility') void shell.openExternal(ACCESSIBILITY_PANE);
+}
+
+function screenRecordingSafe(): boolean {
+  try { return screenRecordingAllowed(); } catch { return false; }
 }
 
 function toState(status: string): PermissionState {

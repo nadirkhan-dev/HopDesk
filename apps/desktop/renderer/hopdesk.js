@@ -50,11 +50,16 @@ export function initHopdesk({ api, toast, confirmDialog }) {
     $('#mine-detail').textContent = detail ?? '';
     $('#mine-detail').hidden = !detail;
     renderTrusted(status.trusted ?? []);
+    renderWatching(status.sessions ?? []);
     const items = status.permissions?.items ?? [];
     const fix = $('#mine-fix');
     // Where every permission is listed with its own button, the single one is redundant.
     fix.hidden = !status.permissions?.action || items.length > 0;
     fix.onclick = () => api.openPermissionSettings(status.permissions.action);
+    // The step-by-step screen, reachable again whenever something is missing.
+    const setupButton = $('#mine-setup');
+    setupButton.hidden = !items.some(i => !i.granted);
+    setupButton.onclick = () => { void openSetup(); };
     renderPermissions(items);
     $('#mine-protection').textContent = status.deviceId ? `Identity key: ${status.keyProtection}` : '';
 
@@ -121,6 +126,52 @@ export function initHopdesk({ api, toast, confirmDialog }) {
       }
       box.append(row);
     }
+  }
+
+  /**
+   * While anyone is connected, this stays on screen. Someone who walks up to
+   * this computer should be able to see that its screen is being watched
+   * without opening anything.
+   */
+  function renderWatching(sessions) {
+    const bar = $('#watching');
+    bar.hidden = !sessions.length;
+    if (!sessions.length) return;
+    bar.replaceChildren();
+    const dot = document.createElement('span');
+    dot.className = 'dot';
+    const text = document.createElement('span');
+    const names = sessions.map(s => s.viewerName || s.viewerId).join(', ');
+    text.textContent = sessions.length === 1
+      ? `${names} is connected to this computer and can see this screen.`
+      : `${sessions.length} computers are connected to this one: ${names}.`;
+    const spacer = document.createElement('span');
+    spacer.className = 'spacer';
+    const stop = document.createElement('button');
+    stop.className = 'btn ghost small';
+    stop.textContent = sessions.length === 1 ? 'Disconnect' : 'Disconnect all';
+    stop.onclick = async () => {
+      for (const session of sessions) await api.endHostSession(session.id, 'user-disconnected');
+      toast(sessions.length === 1 ? 'Disconnected.' : 'All computers disconnected.');
+    };
+    bar.append(dot, text, spacer, stop);
+  }
+
+  /** Opening at login, so this computer is reachable after a restart. */
+  async function renderLoginItem() {
+    const state = await api.loginItem?.();
+    const wrap = $('#mine-login');
+    if (!state?.supported) { wrap.hidden = true; return; }
+    wrap.hidden = false;
+    const check = $('#mine-login-check');
+    check.checked = state.openAtLogin;
+    check.onchange = async () => {
+      const next = await api.setLoginItem(check.checked);
+      check.checked = next.openAtLogin;
+      toast(next.openAtLogin
+        ? 'HopDesk will open when you log in.'
+        : 'HopDesk will no longer open at login.');
+    };
   }
 
   /**
@@ -218,6 +269,97 @@ export function initHopdesk({ api, toast, confirmDialog }) {
       list.append(row);
     }
   }
+
+  /* ------------------------------------------------- first-launch setup */
+
+  /**
+   * The two permissions macOS will not let an app grant itself, one step at a
+   * time. Each step asks macOS for its own dialog first; macOS only shows that
+   * once per app, so when it declines to, the step falls back to opening the
+   * right Settings page. Steps tick themselves as the permissions arrive.
+   */
+  const setup = { open: false, timer: null, screenWasMissing: false };
+
+  const setupStepFor = id => $(id === 'screen-recording' ? '#setup-step-1' : '#setup-step-2');
+
+  function renderSetup(items) {
+    if (!setup.open) return;
+    let allGranted = items.length > 0;
+    for (const item of items) {
+      const step = setupStepFor(item.id);
+      if (!step) continue;
+      step.querySelector('.setup-name').textContent = item.name;
+      step.querySelector('.setup-state').textContent = item.granted ? '✓ Allowed' : 'Not allowed yet';
+      step.classList.toggle('done', item.granted);
+      step.querySelector('.setup-why').textContent = item.why;
+      const how = step.querySelector('.setup-how');
+      const ask = step.querySelector('.setup-ask');
+      const settings = step.querySelector('.setup-settings');
+      const restart = step.querySelector('.setup-restart');
+      const promptGone = step.dataset.promptGone === 'yes';
+      if (item.granted) {
+        how.textContent = '';
+        ask.hidden = true;
+        settings.hidden = true;
+        /* Screen Recording only takes effect after a restart, so if it was
+           missing when this opened, offer one. */
+        if (restart) restart.hidden = !setup.screenWasMissing;
+      } else {
+        allGranted = false;
+        how.textContent = promptGone ? item.how : '';
+        ask.hidden = promptGone;
+        settings.hidden = !promptGone;
+        if (restart) restart.hidden = true;
+      }
+    }
+    $('#setup-done').hidden = !allGranted;
+    $('#setup-done-text').hidden = !allGranted;
+    $('#setup-later').textContent = allGranted ? 'Close' : 'Do this later';
+  }
+
+  async function openSetup() {
+    const status = await api.hostStatus();
+    const items = status.permissions?.items ?? [];
+    if (!items.length) return;                       // nothing to ask for on this platform
+    setup.open = true;
+    setup.screenWasMissing = !items.find(i => i.id === 'screen-recording')?.granted;
+    for (const id of ['screen-recording', 'accessibility']) delete setupStepFor(id).dataset.promptGone;
+    renderSetup(items);
+    const dialog = $('#dlg-setup');
+    if (!dialog.open) dialog.showModal();
+    // Ticks each step as the permission arrives, without anyone pressing anything.
+    clearInterval(setup.timer);
+    setup.timer = setInterval(async () => {
+      const report = await api.checkPermissions();
+      renderSetup(report?.items ?? []);
+    }, 1500);
+  }
+
+  function closeSetup() {
+    setup.open = false;
+    clearInterval(setup.timer);
+    setup.timer = null;
+    if ($('#dlg-setup').open) $('#dlg-setup').close();
+    void refreshHost();
+  }
+
+  for (const id of ['screen-recording', 'accessibility']) {
+    const step = setupStepFor(id);
+    step.querySelector('.setup-ask').onclick = async () => {
+      const result = await api.askPermission(id);
+      // macOS asks once. If it showed nothing, the rest is done in Settings.
+      if (!result.granted && !result.prompted) step.dataset.promptGone = 'yes';
+      renderSetup(result.report?.items ?? []);
+    };
+    step.querySelector('.setup-settings').onclick = () => {
+      api.openPermissionSettings(id === 'screen-recording' ? 'open-screen-recording' : 'open-accessibility');
+    };
+    const restart = step.querySelector('.setup-restart');
+    if (restart) restart.onclick = () => api.relaunch();
+  }
+  $('#setup-later').onclick = () => closeSetup();
+  $('#setup-done').onclick = () => closeSetup();
+  $('#dlg-setup').addEventListener('cancel', e => { e.preventDefault(); closeSetup(); });
 
   const refreshHost = async () => renderHost(await api.hostStatus());
 
@@ -762,6 +904,13 @@ export function initHopdesk({ api, toast, confirmDialog }) {
 
   void refreshHost();
   void renderSaved();
+  void renderLoginItem();
+  /* First launch, or any launch where something is still missing: show the
+     steps rather than leaving them to be found in a panel. */
+  void api.hostStatus().then(status => {
+    const items = status.permissions?.items ?? [];
+    if (items.length && items.some(i => !i.granted)) void openSetup();
+  });
   void api.accountState?.().then(renderAccount).catch(() => {});
   return { refreshHost };
 }

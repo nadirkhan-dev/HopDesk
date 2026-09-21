@@ -155,6 +155,21 @@
   #cd-more > summary { font-size: 12px; color: var(--text-dim); cursor: pointer; margin-top: 8px; }
   .hd-view { flex: 1; display: flex; flex-direction: column; background: #000; min-width: 0; }
   .hd-bar { display: flex; align-items: center; gap: 8px; padding: 6px 10px; background: var(--surface); border-bottom: 1px solid var(--border); }
+  #dlg-setup { max-width: 520px; }
+  .setup-step { border: 1px solid var(--border, #444); border-radius: 8px; padding: 10px 12px; margin-top: 10px; }
+  .setup-step.done { opacity: .65; }
+  .setup-step h3 { margin: 0 0 4px; font-size: 14px; display: flex; align-items: center; gap: 8px; }
+  .setup-num { display: inline-flex; align-items: center; justify-content: center; width: 20px; height: 20px;
+    border-radius: 50%; background: var(--accent, #2f6feb); color: #fff; font-size: 12px; }
+  .setup-step.done .setup-num { background: #3fb950; }
+  .setup-state { margin-left: auto; font-size: 12px; font-weight: 600; }
+  .setup-step.done .setup-state { color: #3fb950; }
+  .setup-step p { margin: 4px 0; font-size: 13px; color: var(--text-dim, #aaa); }
+  .setup-step .actions { display: flex; gap: 8px; margin-top: 8px; }
+  .watching { background: #7a2e00; color: #ffd9b0; padding: 6px 14px; font-size: 13px; display: flex; align-items: center; gap: 10px; }
+  .watching .dot { width: 9px; height: 9px; border-radius: 50%; background: #ff7b31; animation: watching-pulse 1.6s ease-in-out infinite; }
+  @keyframes watching-pulse { 50% { opacity: .25; } }
+  .watching .spacer { flex: 1; }
   .saved-row { display: flex; align-items: center; gap: 8px; padding: 8px 0; border-bottom: 1px solid var(--border, #333); }
   .saved-row:last-child { border-bottom: none; }
   .saved-row .who { flex: 1; min-width: 0; }
@@ -344,6 +359,8 @@
 <body>
 
 <div class="banner" id="banner" hidden></div>
+<!-- Visible for as long as someone is connected to this computer. -->
+<div class="watching" id="watching" role="status" hidden></div>
 
 <header class="appbar">
   <div class="brand"><span class="logo" aria-hidden="true">HD</span> HopDesk</div>
@@ -376,9 +393,14 @@
       <p class="hint" id="mine-protection"></p>
       <p class="warn-text" id="mine-detail" hidden></p>
       <button class="btn small" id="mine-fix" hidden>Open System Settings</button>
+      <button class="btn small primary" id="mine-setup" hidden>Set up permissions</button>
       <!-- macOS: every permission hosting needs, allowed or not. -->
       <div class="perms" id="mine-perms" hidden></div>
       <!-- Computers allowed in without asking, and how to stop trusting them. -->
+      <label class="check" id="mine-login" hidden>
+        <input type="checkbox" id="mine-login-check">
+        Open HopDesk at login, so this computer can be reached after a restart
+      </label>
       <details class="section" id="mine-trusted" hidden>
         <summary>Computers you trust</summary>
         <p class="hint" id="mine-trusted-hint">These can connect at any time without an access code and without asking.</p>
@@ -642,6 +664,40 @@
     <button class="btn" id="si-cancel">Cancel</button>
     <button class="btn primary" id="si-submit">Sign in</button>
   </div>
+</dialog>
+
+<!-- First launch on a Mac: the two permissions macOS will not let an app grant
+     itself, one step at a time. -->
+<dialog id="dlg-setup" aria-labelledby="setup-title">
+  <h2 id="setup-title">Two things to allow</h2>
+  <p id="setup-intro">
+    macOS asks you to allow these yourself — no app can allow them for you.
+    It takes about a minute, once.
+  </p>
+  <div class="setup-step" id="setup-step-1">
+    <h3><span class="setup-num">1</span> <span class="setup-name">Screen Recording</span> <span class="setup-state"></span></h3>
+    <p class="setup-why">So the other computer can see this screen. Without it they get a blank picture.</p>
+    <p class="setup-how"></p>
+    <div class="actions">
+      <button class="btn primary setup-ask">Allow Screen Recording</button>
+      <button class="btn setup-settings" hidden>Open Settings</button>
+      <button class="btn primary setup-restart" hidden>Reopen HopDesk</button>
+    </div>
+  </div>
+  <div class="setup-step" id="setup-step-2">
+    <h3><span class="setup-num">2</span> <span class="setup-name">Accessibility</span> <span class="setup-state"></span></h3>
+    <p class="setup-why">So the other computer's mouse and keyboard work here. Without it they can watch but not control.</p>
+    <p class="setup-how"></p>
+    <div class="actions">
+      <button class="btn primary setup-ask">Allow Accessibility</button>
+      <button class="btn setup-settings" hidden>Open Settings</button>
+    </div>
+  </div>
+  <p class="hint" id="setup-done-text" hidden>Both are allowed. This computer is ready to be connected to.</p>
+  <menu>
+    <button class="btn" id="setup-later">Do this later</button>
+    <button class="btn primary" id="setup-done" hidden>Done</button>
+  </menu>
 </dialog>
 
 <dialog id="dlg-consent" aria-labelledby="consent-title">

@@ -82,6 +82,25 @@ test('the installed Mac app starts, lists what macOS allows it, and loads its in
     assert.match(after, /input ready \(darwin\)/,
       `the input backend did not load: ${(/input injection unavailable: .*/.exec(after) ?? [''])[0]}`);
 
+    /* The setup steps, which is what a person sees on a fresh Mac. They only
+       appear while something is missing — a CI Mac may have both already. */
+    const wizard = await app.eval(`
+      const dialog = document.querySelector('#dlg-setup');
+      return {
+        open: dialog.open === true,
+        steps: [...document.querySelectorAll('.setup-step')].map(s => ({
+          name: s.querySelector('.setup-name').textContent,
+          state: s.querySelector('.setup-state').textContent,
+          hasAsk: !!s.querySelector('.setup-ask'),
+        })),
+      }`);
+    assert.equal(wizard.steps.length, 2, 'the setup screen does not have two steps');
+    assert.deepEqual(wizard.steps.map(s => s.name), ['Screen Recording', 'Accessibility']);
+    if (screenLogged === 'not allowed' || accessLogged === 'not allowed') {
+      assert.equal(wizard.open, true, 'a permission is missing but the setup screen did not open');
+      assert.ok(wizard.steps.every(s => s.hasAsk), 'a step has no button to ask macOS');
+    }
+
     /* Without Accessibility the window says so, rather than looking ready. */
     if (accessLogged === 'not allowed') {
       const detail = await app.eval(`return document.querySelector('#mine-detail').textContent`);

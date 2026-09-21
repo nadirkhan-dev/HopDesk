@@ -56,6 +56,7 @@ contextBridge.exposeInMainWorld('hopdesk', {
   setRemoteAccess: patch => ipcRenderer.invoke('setRemoteAccess', patch),
   regenerateAccessCode: () => ipcRenderer.invoke('regenerateAccessCode'),
   checkPermissions: () => ipcRenderer.invoke('checkPermissions'),
+  askPermission: id => ipcRenderer.invoke('askPermission', id),
   requestPermissions: () => ipcRenderer.invoke('requestPermissions'),
   openPermissionSettings: action => ipcRenderer.invoke('openPermissionSettings', action),
   relaunch: () => ipcRenderer.invoke('relaunch'),
@@ -64,6 +65,8 @@ contextBridge.exposeInMainWorld('hopdesk', {
   forgetDevice: deviceId => ipcRenderer.invoke('forgetDevice', deviceId),
   answerConsent: (id, decision) => ipcRenderer.invoke('answerConsent', id, decision),
   trustedList: () => ipcRenderer.invoke('trustedList'),
+  loginItem: () => ipcRenderer.invoke('loginItem'),
+  setLoginItem: open => ipcRenderer.invoke('setLoginItem', open),
   trustedRemove: deviceId => ipcRenderer.invoke('trustedRemove', deviceId),
   connectSaved: deviceId => ipcRenderer.invoke('connectSaved', deviceId),
   onHostStatus: handler => {

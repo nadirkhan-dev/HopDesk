@@ -637,6 +637,32 @@ test('full screen, the hiding toolbar, the scaling modes and the remote pointer'
   }
 });
 
+test('on Linux there is no macOS setup to do, and nothing pretends otherwise',
+  { skip, timeout: 120_000 }, async () => {
+  /* The permission wizard and panel belong to macOS. On a computer with no
+     permissions to ask for they must stay out of the way — and the menu bar
+     item must not appear either, since quitting here really means quitting. */
+  const app = await startViewer();
+  try {
+    const state = await app.eval(`
+      const status = await window.hopdesk.hostStatus();
+      return {
+        items: status.permissions?.items?.length ?? 0,
+        wizardOpen: document.querySelector('#dlg-setup').open === true,
+        panelHidden: document.querySelector('#mine-perms').hidden,
+        setupButtonHidden: document.querySelector('#mine-setup').hidden,
+        loginItem: await window.hopdesk.loginItem(),
+      }`);
+    assert.equal(state.items, 0, 'Linux reported macOS permissions');
+    assert.equal(state.wizardOpen, false, 'the macOS setup wizard opened on Linux');
+    assert.equal(state.panelHidden, true, 'the macOS permissions panel showed on Linux');
+    assert.equal(state.setupButtonHidden, true);
+    assert.equal(state.loginItem.supported, false, 'Linux offered "open at login"');
+  } finally {
+    await app.close();
+  }
+});
+
 /* --------------------------------------------------------------- helpers */
 
 /** A TCP proxy whose connections the test can destroy on demand. */
