@@ -86,6 +86,12 @@ async function connect(viewer, { deviceId, code, address = '127.0.0.1' }) {
 
 const allow = host => host.eval(`document.querySelector('#consent-allow').click(); return true`);
 
+/** Allow, and tick "let this computer connect again without asking". */
+const allowAndTrust = host => host.eval(`
+  document.querySelector('#consent-trust').checked = true;
+  document.querySelector('#consent-allow').click();
+  return true`);
+
 /**
  * Proves input reaches the host now: parks the host's real pointer in a corner,
  * moves the viewer's mouse to a fraction of the video, and waits for the host
@@ -408,6 +414,74 @@ test('a host that cannot fully share its screen tells the viewer, in plain words
     /* The notice belongs to that session and goes with it. */
     await viewer.eval(`document.querySelector('#hd-disconnect').click(); return true`);
     await viewer.waitFor(`return document.querySelector('#hd-notice').hidden === true`, 15_000, 'the notice to go with the session');
+  } finally {
+    await viewer.close();
+    await host.close();
+  }
+});
+
+test('pairing once, then connecting with one click: no code, no prompt, and revoking stops it',
+  { skip, timeout: 240_000 }, async () => {
+  const host = await startHost();
+  const viewer = await startViewer();
+  try {
+    /* Before pairing, the viewer has nothing saved and cannot connect without a code. */
+    assert.equal(await viewer.eval(`return document.querySelector('#saved').hidden`), true);
+    const refused = await viewer.eval(`
+      try { await window.hopdesk.connectSaved(${JSON.stringify(host.deviceId)}); return 'connected'; }
+      catch (e) { return e.message; }`);
+    assert.match(refused, /has not been paired/, `unpaired connect said: ${refused}`);
+
+    /* Pair: an ordinary code connection, allowed with the box ticked. */
+    await connect(viewer, host);
+    await host.waitFor(`return document.querySelector('#dlg-consent')?.open === true`, 25_000, 'the Allow prompt');
+    assert.equal(await host.eval(`return document.querySelector('#consent-trust-wrap').hidden`), false,
+      'the pairing checkbox was not offered for a code connection');
+    await allowAndTrust(host);
+    await viewer.waitFor(`const v = document.querySelector('#hd-video'); return v.videoWidth > 0 && v.readyState >= 2`,
+      45_000, 'video while pairing');
+
+    /* The host now lists it, and the viewer has saved it. */
+    const trusted = await host.waitFor(`
+      const rows = [...document.querySelectorAll('#mine-trusted-list .saved-row')];
+      return rows.length ? rows.map(r => r.dataset.deviceId) : null`, 15_000, 'the trusted list on the host');
+    assert.equal(trusted.length, 1);
+    await viewer.eval(`document.querySelector('#hd-disconnect').click(); return true`);
+    await viewer.waitFor(`return document.querySelector('#hd-view')?.hidden === true`, 15_000, 'the session to end');
+    const saved = await viewer.waitFor(`
+      return document.querySelector('#saved').hidden ? null
+        : [...document.querySelectorAll('#saved-list .saved-row b')].map(b => b.textContent)`,
+      15_000, 'the saved computer on the viewer');
+    assert.equal(saved.length, 1, `saved computers: ${JSON.stringify(saved)}`);
+
+    /* One click. No code typed, and nobody answers anything on the host. */
+    assert.equal(await host.eval(`return document.querySelector('#dlg-consent')?.open === true`), false);
+    await viewer.eval(`
+      [...document.querySelectorAll('#saved-list .saved-row')]
+        .find(r => r.textContent.includes(${JSON.stringify(host.deviceId)}))
+        .querySelector('.btn.primary').click();
+      return true`);
+    await viewer.waitFor(`const v = document.querySelector('#hd-video'); return v.videoWidth > 0 && v.readyState >= 2`,
+      45_000, 'video from the one-click connection');
+    assert.equal(await host.eval(`return document.querySelector('#dlg-consent')?.open === true`), false,
+      'the host was asked again for a paired computer');
+    await pointerReachesHost(viewer, 0.5, 'a paired session');
+    assert.match(await hostLog(host), /authorised for HD-\S+ \(paired\)/);
+
+    /* Revoking stops the live session and closes the door. */
+    await host.eval(`
+      const row = document.querySelector('#mine-trusted-list .saved-row');
+      row.querySelector('.btn.ghost').click();
+      return true`);
+    await host.waitFor(`return document.querySelector('#dlg-confirm')?.open === true`, 10_000, 'the confirmation');
+    await host.eval(`document.querySelector('#confirm-ok').click(); return true`);
+    await viewer.waitFor(`return document.querySelector('#hd-view')?.hidden === true`, 20_000, 'the revoked session to end');
+    await host.waitFor(`return document.querySelector('#mine-trusted').hidden === true`, 10_000, 'the trusted list to empty');
+
+    const after = await viewer.eval(`
+      try { await window.hopdesk.connectSaved(${JSON.stringify(host.deviceId)}); return 'connected'; }
+      catch (e) { return e.message; }`);
+    assert.notEqual(after, 'connected', 'a revoked computer still connected');
   } finally {
     await viewer.close();
     await host.close();

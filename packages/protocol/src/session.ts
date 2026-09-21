@@ -159,21 +159,29 @@ export interface ConsentRequest {
   auth: AuthKind;
 }
 
-export type ConsentDecision = 'allow' | 'reject';
+/**
+ * What the person at the host answered. `allow-and-trust` also means "and let
+ * this computer connect again without asking": the caller stores the viewer's
+ * public key, and later connections arrive as `paired`.
+ */
+export type ConsentDecision = 'allow' | 'allow-and-trust' | 'reject';
 
 export interface AcceptOptions {
   /**
    * Asks the person at this computer. Consulted for an access code and for a
    * computer on the same account: both are someone deciding to connect now.
-   * A grant resumes an already-approved session, and unattended access is an
+   * A grant resumes an already-approved session, and a paired device is one
    * explicit opt-in that stands in for the answer.
    */
   authorize: (request: ConsentRequest, signal: AbortSignal) => Promise<ConsentDecision>;
   /**
    * Which kinds of connection need that prompt. The default asks for `code` and
-   * `account`; a host with unattended access enabled overrides it.
+   * `account`. `paired` never does — being on the trusted list *is* the answer,
+   * given once — and `grant` resumes a session already allowed.
    */
   needsConsent?: (auth: AuthKind) => boolean;
+  /** Called when the answer was 'allow-and-trust', with the viewer to remember. */
+  onTrust?: (viewer: { viewerId: string; viewerKey: Uint8Array; viewerName: string }) => void;
   grants: GrantStore;
   handshakeTimeoutMs?: number;
   consentTimeoutMs?: number;
@@ -230,6 +238,8 @@ export async function acceptViewer(link: MessageLink, auth: HostAuthenticator, o
     return new HandshakeError('rejected', `Connection not allowed: ${reason}`);
   };
 
+  // Already trusted when it arrived this way; possibly trusted by the answer below.
+  let trusted = viewer.auth === 'paired';
   const needsConsent = opts.needsConsent ?? (auth => auth === 'code' || auth === 'account');
   if (needsConsent(viewer.auth)) {
     const abort = new AbortController();
@@ -241,7 +251,13 @@ export async function acceptViewer(link: MessageLink, auth: HostAuthenticator, o
     );
     if (decision === 'timeout') abort.abort();
     if (control.closed) throw new HandshakeError('closed', 'The viewer left before the request was answered');
-    if (decision !== 'allow') throw reject(decision === 'timeout' ? 'timeout' : 'user-rejected');
+    if (decision !== 'allow' && decision !== 'allow-and-trust') {
+      throw reject(decision === 'timeout' ? 'timeout' : 'user-rejected');
+    }
+    if (decision === 'allow-and-trust') {
+      opts.onTrust?.({ viewerId: viewer.viewerId, viewerKey: viewer.viewerKey, viewerName: viewer.viewerName });
+      trusted = true;
+    }
   }
 
   const grantTtl = opts.grantTtlMs ?? 10 * 60_000;
@@ -256,7 +272,11 @@ export async function acceptViewer(link: MessageLink, auth: HostAuthenticator, o
     grantMessage = { id: grant.id, secret: toBase64(grant.secret), expiresAt: grant.expiresAt };
   }
   const sessionId = toBase64(randomBytes(16));
-  control.send({ type: 'auth-result', allowed: true, sessionId, ...(grantMessage ? { grant: grantMessage } : {}) });
+  control.send({
+    type: 'auth-result', allowed: true, sessionId,
+    ...(grantMessage ? { grant: grantMessage } : {}),
+    ...(trusted ? { trusted: true } : {}),
+  });
 
   const { root, ...publicViewer } = viewer;
   return { control, viewer: publicViewer, root, sessionId, grantId };
@@ -269,8 +289,10 @@ export interface ViewerSession {
   host: Omit<AuthenticatedHost, 'root'>;
   root: Uint8Array;
   sessionId: string;
-  /** Present for code/unattended connections: use it to reconnect silently. */
+  /** Present for connections that may resume: use it to reconnect silently. */
   grant?: { id: string; secret: Uint8Array; expiresAt: number };
+  /** The host will let this computer in again with no code and no prompt. */
+  trusted: boolean;
 }
 
 export interface ConnectOptions extends ViewerHandshakeOptions {
@@ -304,7 +326,7 @@ export async function connectToHost(link: MessageLink, opts: ConnectOptions): Pr
     throw new HandshakeError('rejected', `The connection was not allowed: ${result.reason ?? 'not-allowed'}`);
   }
   const { root, ...publicHost } = host;
-  const session: ViewerSession = { control, host: publicHost, root, sessionId: result.sessionId ?? '' };
+  const session: ViewerSession = { control, host: publicHost, root, sessionId: result.sessionId ?? '', trusted: result.trusted === true };
   if (result.grant) session.grant = { id: result.grant.id, secret: fromBase64(result.grant.secret), expiresAt: result.grant.expiresAt };
   return session;
 }

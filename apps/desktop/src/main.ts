@@ -24,11 +24,12 @@ import { HostRole } from './host.js';
 import { ViewerRole } from './viewer.js';
 import { openInputController, linuxBackend, type InputController } from '@hopdesk/platform';
 import { createPermissionManager, openPermissionSettings, type PermissionReport } from './permissions.js';
+import { TrustedDevices } from './trusted.js';
 import { viewerNotices } from './permission-report.js';
 import {
-  MAX_CLIPBOARD_CHARS, unattendedVerifier, type ConsentDecision, type ConsentRequest,
+  MAX_CLIPBOARD_CHARS, type ConsentDecision, type ConsentRequest,
 } from '@hopdesk/protocol';
-import { fromBase64, toBase64 } from '@hopdesk/crypto';
+import { fromBase64 } from '@hopdesk/crypto';
 
 /**
  * Main process.
@@ -80,6 +81,8 @@ const credentials = new CredentialStore(dataDir, forcedBackend);
 const connections = new ConnectionManager(dataDir, credentials);
 const settings = new SettingsStore(dataDir);
 const knownDevices = new KnownDevices(dataDir);
+/** The computers this one lets in without asking; public keys only. */
+const trustedDevices = new TrustedDevices(dataDir);
 
 /** Set once the device identity has been loaded, at startup. */
 let localIdentity: LocalIdentity | null = null;
@@ -378,6 +381,7 @@ function createRoles(identity: LocalIdentity) {
       const peer = rtc.attach(sessionId, win.webContents, iceServers, icePolicy());
       return { peer, close: () => closeHostWindowIfIdle() };
     },
+    trusted: () => trustedDevices,
     input: hostInput,
     inputProblem,
     notices,
@@ -424,7 +428,11 @@ function createRoles(identity: LocalIdentity) {
     iceServers: () => account?.iceServers() ?? Promise.resolve([]),
     connectionKind: sessionId => rtc.connectionKind(sessionId),
     pinnedKey: deviceId => knownDevices.keyFor(deviceId),
-    rememberKey: (deviceId, key, name) => knownDevices.remember(deviceId, key, name || deviceId),
+    rememberKey: (deviceId, key, name, where) => knownDevices.remember(deviceId, key, name || deviceId, where),
+    lastAddress: deviceId => {
+      const device = knownDevices.list().find(d => d.deviceId === deviceId);
+      return device?.lastAddress ? { address: device.lastAddress, ...(device.lastPort ? { port: device.lastPort } : {}) } : undefined;
+    },
   });
   viewerRole.on('status', (status: unknown) => send('deviceSession', status));
 
@@ -480,8 +488,8 @@ app.whenReady().then(async () => {
 
   /* getDisplayMedia asks the application which screen to share: the Host shares
      the primary display. Answering it here means no picker appears on a machine
-     that is being connected to, which is the point of unattended access — the
-     consent prompt has already been answered by then. */
+     that is being connected to, which is the point of a trusted device — the
+     consent prompt was answered once, when it was paired. */
   electronSession.defaultSession.setDisplayMediaRequestHandler((request, callback) => {
     const fromHostWindow = hostWindow !== null && !hostWindow.isDestroyed()
       && request.frame?.url === HOST_URL;
@@ -520,6 +528,7 @@ app.whenReady().then(async () => {
   }
   await settings.load();
   await knownDevices.load();
+  await trustedDevices.load();
 
   try {
     localIdentity = await loadIdentity(dataDir);
@@ -1013,9 +1022,7 @@ handle('getSettings', async () => ({
   rdpAvailable: Boolean(await rdpAvailable()),
   spiceAvailable: Boolean(await spiceAvailable()),
   defaults: settings.get().defaults,
-  /* Without the verifier: the UI needs to know whether unattended access is on,
-     never the value that would let it be used. */
-  remoteAccess: (({ enabled, port, announce, unattended }) => ({ enabled, port, announce, unattended }))(settings.get().remoteAccess),
+  remoteAccess: (({ enabled, port, announce }) => ({ enabled, port, announce }))(settings.get().remoteAccess),
   account: settings.get().account,
 }));
 
@@ -1029,7 +1036,7 @@ handle('openLogFolder', () => { void shell.openPath(dataDir); });
 
 const hostUnavailable = () => ({
   enabled: false, listening: false, deviceId: '', name: hostname(), accessCode: null,
-  port: 0, announcing: false, unattended: false,
+  port: 0, announcing: false, trusted: [],
   keyProtection: 'unavailable',
   detail: 'This computer has no HopDesk identity, so it cannot accept connections. See the log.',
   sessions: [],
@@ -1063,7 +1070,7 @@ handle('openPermissionSettings', (action: string) => {
   return { ok: true };
 });
 
-handle('setRemoteAccess', async (patch: { enabled?: boolean; announce?: boolean; port?: number; unattended?: boolean; unattendedPassword?: string | null }) => {
+handle('setRemoteAccess', async (patch: { enabled?: boolean; announce?: boolean; port?: number }) => {
   if (!host) throw new Error('This computer has no HopDesk identity yet');
   /* Switching sharing on is the moment to ask the operating system, so the
      answer arrives before someone tries to connect rather than after. On
@@ -1077,22 +1084,6 @@ handle('setRemoteAccess', async (patch: { enabled?: boolean; announce?: boolean;
   if (typeof patch?.announce === 'boolean') update.remoteAccess!.announce = patch.announce;
   if (Number.isInteger(patch?.port)) update.remoteAccess!.port = patch.port;
 
-  /* Unattended access: a password is turned into the handshake verifier here and
-     the password itself is never stored, logged or sent. Turning it off removes
-     the verifier, so the door closes rather than merely hiding. */
-  if (patch?.unattendedPassword !== undefined) {
-    if (patch.unattendedPassword === null || patch.unattendedPassword === '') {
-      update.remoteAccess!.unattended = false;
-      update.remoteAccess!.unattendedVerifier = undefined;
-    } else {
-      if (patch.unattendedPassword.length < 8) throw new Error('Choose an unattended access password of at least 8 characters');
-      const verifier = await unattendedVerifier(patch.unattendedPassword, host.deviceId);
-      update.remoteAccess!.unattendedVerifier = toBase64(verifier);
-      update.remoteAccess!.unattended = patch.unattended !== false;
-    }
-  } else if (typeof patch?.unattended === 'boolean') {
-    update.remoteAccess!.unattended = patch.unattended;
-  }
   if (typeof patch?.enabled === 'boolean') update.remoteAccess!.enabled = patch.enabled;
 
   const next = await settings.update(update);
@@ -1123,8 +1114,19 @@ handle('endHostSession', (id: string, reason?: string) => {
 handle('answerConsent', (id: string, decision: string) => {
   const settle = consentRequests.get(String(id));
   if (!settle) return { ok: false };
-  settle(decision === 'allow' ? 'allow' : 'reject');
+  /* 'allow-and-trust' is Allow plus "let this computer connect again without
+     asking": the host remembers the viewer's public key. */
+  settle(decision === 'allow' ? 'allow' : decision === 'allow-and-trust' ? 'allow-and-trust' : 'reject');
   return { ok: true };
+});
+
+handle('trustedList', () => (host ? host.status().trusted : []));
+
+handle('trustedRemove', (deviceId: string) => {
+  if (!host) throw new Error('This computer has no HopDesk identity yet');
+  const removed = host.revokeTrust(String(deviceId));
+  send('hostStatus', hostStatusPayload());
+  return { ok: removed };
 });
 
 /* Messages from the hidden capture window: a viewer's input, its clipboard, and
@@ -1268,7 +1270,21 @@ handle('connectComputer', async (deviceId: string) => {
   }
 });
 
-handle('knownDevices', () => knownDevices.list().map(d => ({ deviceId: d.deviceId, name: d.name, lastConnected: d.lastConnected })));
+handle('knownDevices', () => knownDevices.list().map(d => ({
+  deviceId: d.deviceId, name: d.name, lastConnected: d.lastConnected,
+  paired: d.paired === true, lastAddress: d.lastAddress,
+})));
+
+/* One click on a saved computer: no code, no prompt — it paired with this one. */
+handle('connectSaved', async (deviceId: string) => {
+  if (!viewer) throw new Error('This computer has no HopDesk identity yet');
+  const id = String(deviceId);
+  const device = knownDevices.list().find(d => d.deviceId === id);
+  if (!device?.paired) {
+    throw new Error('That computer has not been paired with this one yet. Connect with its access code once, and tick "Let this computer connect again without asking".');
+  }
+  return viewer.connectPaired({ deviceId: id });
+});
 handle('forgetDevice', (deviceId: string) => { knownDevices.forget(String(deviceId)); return { ok: true }; });
 
 /* Anything unhandled reaches the log rather than vanishing or killing the app

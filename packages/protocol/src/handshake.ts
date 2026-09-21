@@ -1,6 +1,6 @@
 import {
   Spake2, passwordScalar, secretScalar, deriveSessionRoot, deviceIdFromPublicKey, sign, verify,
-  sha256, encodeFields, concat, equalBytes, utf8, toBase64, fromBase64, bigIntToBytes, bytesToBigInt,
+  sha256, encodeFields, concat, equalBytes, utf8, toBase64, fromBase64,
   generateEphemeral, deriveExchange, ExchangeError,
   type DeviceIdentity, type EphemeralKeyPair, type Spake2Result,
 } from '@hopdesk/crypto';
@@ -64,11 +64,6 @@ function signedBody(bind: Uint8Array, a: Uint8Array, b: Uint8Array, mac: Uint8Ar
   return concat(bind, a, b, mac);
 }
 
-/** The scalar a host stores for unattended access: never the password itself. */
-export async function unattendedVerifier(password: string, hostId: string): Promise<Uint8Array> {
-  return bigIntToBytes(await passwordScalar(password, hostId), 32);
-}
-
 /* ------------------------------------------------------------------ host */
 
 export interface AuthenticatedViewer {
@@ -88,8 +83,12 @@ export interface HostAuthOptions {
   /** Called when repeated failures force a new access code. */
   rotateAccessCode: () => void;
   grants: GrantStore;
-  /** Stored verifier when unattended access is enabled; null otherwise. */
-  unattended?: () => Uint8Array | null;
+  /**
+   * Whether this viewer's device key is one the person at this computer has
+   * chosen to trust, for `paired`. Only public keys are ever compared: there is
+   * no stored secret for an attacker to read and replay.
+   */
+  trusts?: (viewerId: string, viewerKey: Uint8Array) => boolean;
   /**
    * Whether a device may connect because it is on the same HopDesk account.
    * Given the Device ID *and* the key it presented, so a relay cannot pass off
@@ -98,7 +97,6 @@ export interface HostAuthOptions {
   accountAuthorised?: (viewerId: string, viewerKey: Uint8Array) => boolean;
   now?: () => number;
   limiter?: AttemptLimiter;
-  unattendedLimiter?: AttemptLimiter;
   nonces?: NonceCache;
 }
 
@@ -115,7 +113,6 @@ export interface PendingHostHandshake {
 export class HostAuthenticator {
   readonly deviceId: string;
   readonly limiter: AttemptLimiter;
-  private readonly unattendedLimiter: AttemptLimiter;
   private readonly nonces: NonceCache;
   private readonly now: () => number;
 
@@ -123,7 +120,6 @@ export class HostAuthenticator {
     this.deviceId = deviceIdFromPublicKey(opts.identity.publicKey);
     this.now = opts.now ?? Date.now;
     this.limiter = opts.limiter ?? new AttemptLimiter(() => opts.rotateAccessCode(), undefined, this.now);
-    this.unattendedLimiter = opts.unattendedLimiter ?? new AttemptLimiter(() => {}, undefined, this.now);
     this.nonces = opts.nonces ?? new NonceCache(undefined, undefined, this.now);
   }
 
@@ -146,7 +142,17 @@ export class HostAuthenticator {
     if (hello.auth === 'account') {
       if (!hello.dh) return error('protocol');
       if (!this.opts.accountAuthorised?.(hello.viewerId, viewerKey)) return error('not-authorised');
-      return this.accountChallenge(hello, viewerKey);
+      return this.exchangeChallenge(hello, viewerKey);
+    }
+
+    /* A device this computer was told to trust, once, by the person sitting at
+       it. The proof is the viewer's signature over the binding with the device
+       key whose public half is in the trusted list — nothing typed, nothing
+       stored that could be replayed if this computer's files were read. */
+    if (hello.auth === 'paired') {
+      if (!hello.dh) return error('protocol');
+      if (!this.opts.trusts?.(hello.viewerId, viewerKey)) return error('not-paired');
+      return this.exchangeChallenge(hello, viewerKey);
     }
 
     if (!hello.share) return error('protocol');
@@ -157,13 +163,13 @@ export class HostAuthenticator {
       if (!grant) return error('grant-invalid');
       w = secretScalar(grant.secret, `${this.deviceId}\0${grant.id}`);
     } else {
-      const secret = hello.auth === 'code' ? this.opts.accessCode() : this.opts.unattended?.() ?? null;
-      if (secret === null) return error(hello.auth === 'code' ? 'code-disabled' : 'unattended-disabled');
-      const decision = (hello.auth === 'code' ? this.limiter : this.unattendedLimiter).begin();
+      const secret = this.opts.accessCode();
+      if (secret === null) return error('code-disabled');
+      const decision = this.limiter.begin();
       if (!decision.ok) return error(decision.reason === 'busy' ? 'busy' : 'rate-limited', decision.retryAfterMs);
       attempt = decision.attempt;
       try {
-        w = typeof secret === 'string' ? await passwordScalar(secret, this.deviceId) : bytesToBigInt(secret);
+        w = await passwordScalar(secret, this.deviceId);
       } catch {
         attempt.fail();
         return error('protocol');
@@ -228,8 +234,13 @@ export class HostAuthenticator {
     return { kind: 'challenge', reply, pending };
   }
 
-  /** The account-authorised half of `onHello`: signed ephemeral X25519. */
-  private accountChallenge(hello: HelloMessage, viewerKey: Uint8Array): HelloOutcome {
+  /**
+   * The half of `onHello` for the kinds with no typed secret — `paired` and
+   * `account`: a signed ephemeral X25519 exchange. Forward secret, and
+   * authenticated by both device keys, so whoever carries the messages cannot
+   * impersonate either side.
+   */
+  private exchangeChallenge(hello: HelloMessage, viewerKey: Uint8Array): HelloOutcome {
     const ephemeral = generateEphemeral();
     const hostNonce = toBase64(randomBytes(32));
     const hostKey = toBase64(this.opts.identity.publicKey);
@@ -289,7 +300,7 @@ export class HostAuthenticator {
 export type ViewerCredential =
   | { kind: 'code'; code: string }
   | { kind: 'grant'; id: string; secret: Uint8Array }
-  | { kind: 'unattended'; password: string }
+  | { kind: 'paired' }
   /** Both computers are on the same HopDesk account; no secret is typed. */
   | { kind: 'account' };
 
@@ -336,7 +347,8 @@ export class ViewerHandshake {
       auth: credential.kind,
     };
 
-    if (credential.kind === 'account') {
+    // No secret to type: an ephemeral exchange, signed by this device's key.
+    if (credential.kind === 'account' || credential.kind === 'paired') {
       const ephemeral = generateEphemeral();
       hello.dh = toBase64(ephemeral.publicKey);
       return new ViewerHandshake(opts, null, ephemeral, hello);
@@ -344,7 +356,7 @@ export class ViewerHandshake {
 
     const w = credential.kind === 'grant'
       ? secretScalar(credential.secret, `${opts.hostId}\0${credential.id}`)
-      : await passwordScalar(credential.kind === 'code' ? credential.code : credential.password, opts.hostId);
+      : await passwordScalar(credential.code, opts.hostId);
     const spake = new Spake2({ role: 'A', idA: utf8(viewerId), idB: utf8(opts.hostId), w });
     hello.share = toBase64(spake.outbound);
     if (credential.kind === 'grant') hello.grantId = credential.id;

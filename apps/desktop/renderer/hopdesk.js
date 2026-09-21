@@ -46,6 +46,7 @@ export function initHopdesk({ api, toast, confirmDialog }) {
     const detail = permissionDetail ?? status.detail ?? (status.inputAvailable === false ? status.inputDetail : '');
     $('#mine-detail').textContent = detail ?? '';
     $('#mine-detail').hidden = !detail;
+    renderTrusted(status.trusted ?? []);
     const items = status.permissions?.items ?? [];
     const fix = $('#mine-fix');
     // Where every permission is listed with its own button, the single one is redundant.
@@ -119,6 +120,102 @@ export function initHopdesk({ api, toast, confirmDialog }) {
     }
   }
 
+  /**
+   * Computers allowed in without asking, with a way to stop. Removing one also
+   * disconnects it if it is connected right now.
+   */
+  function renderTrusted(list) {
+    const box = $('#mine-trusted');
+    const rows = $('#mine-trusted-list');
+    box.hidden = !list.length;
+    rows.replaceChildren();
+    for (const device of list) {
+      const row = document.createElement('div');
+      row.className = 'saved-row';
+      row.dataset.deviceId = device.deviceId;
+      const who = document.createElement('div');
+      who.className = 'who';
+      const name = document.createElement('b');
+      name.textContent = device.name || device.deviceId;
+      const detail = document.createElement('span');
+      const used = device.lastUsed ? `last connected ${whenWords(device.lastUsed)}` : 'not connected yet';
+      detail.textContent = `${device.deviceId} · ${used} · expires ${whenWords(device.expiresAt)}`;
+      who.append(name, detail);
+      const stop = document.createElement('button');
+      stop.className = 'btn ghost small';
+      stop.textContent = 'Stop trusting';
+      stop.onclick = async () => {
+        if (!(await confirmDialog('Stop trusting this computer?',
+          `${device.name || device.deviceId} will need an access code and someone here to allow it. If it is connected now, it will be disconnected.`,
+          'Stop trusting'))) return;
+        await api.trustedRemove(device.deviceId);
+        toast('That computer is no longer trusted.');
+        await refreshHost();
+      };
+      row.append(who, stop);
+      rows.append(row);
+    }
+  }
+
+  /** "in 87 days", "3 days ago" — plain words instead of a timestamp. */
+  function whenWords(at) {
+    if (!at) return 'never';
+    const days = Math.round((at - Date.now()) / 86400000);
+    if (days > 1) return `in ${days} days`;
+    if (days === 1) return 'tomorrow';
+    if (days === 0) return 'today';
+    if (days === -1) return 'yesterday';
+    return `${Math.abs(days)} days ago`;
+  }
+
+  /** Saved computers: the ones that paired with this one. One click connects. */
+  async function renderSaved() {
+    const devices = (await api.knownDevices?.()) ?? [];
+    const paired = devices.filter(d => d.paired);
+    const card = $('#saved');
+    const list = $('#saved-list');
+    card.hidden = !paired.length;
+    list.replaceChildren();
+    for (const device of paired) {
+      const row = document.createElement('div');
+      row.className = 'saved-row';
+      const who = document.createElement('div');
+      who.className = 'who';
+      const name = document.createElement('b');
+      name.textContent = device.name || device.deviceId;
+      const detail = document.createElement('span');
+      detail.textContent = `${device.deviceId} · no code needed`;
+      who.append(name, detail);
+      const connect = document.createElement('button');
+      connect.className = 'btn primary small';
+      connect.textContent = 'Connect';
+      connect.onclick = async () => {
+        connect.disabled = true;
+        connect.textContent = 'Connecting…';
+        try {
+          await api.connectSaved(device.deviceId);
+        } catch (err) {
+          toast(friendlyError(err.message));
+        } finally {
+          connect.disabled = false;
+          connect.textContent = 'Connect';
+        }
+      };
+      const forget = document.createElement('button');
+      forget.className = 'btn ghost small';
+      forget.textContent = 'Remove';
+      forget.onclick = async () => {
+        if (!(await confirmDialog('Remove this computer?',
+          `${device.name || device.deviceId} will disappear from this list. It can still be connected to with its Device ID and access code.`,
+          'Remove'))) return;
+        await api.forgetDevice(device.deviceId);
+        await renderSaved();
+      };
+      row.append(who, connect, forget);
+      list.append(row);
+    }
+  }
+
   const refreshHost = async () => renderHost(await api.hostStatus());
 
   $('#mine-toggle').onclick = async () => {
@@ -172,6 +269,12 @@ export function initHopdesk({ api, toast, confirmDialog }) {
       : request.auth === 'account'
         ? 'It is signed in to the same HopDesk account as this computer.'
         : 'It is using access you granted earlier.';
+    const trust = $('#consent-trust');
+    trust.checked = false;
+    // Only offered for a typed code: an account connection is already vouched for.
+    const offerTrust = request.auth === 'code';
+    $('#consent-trust-wrap').hidden = !offerTrust;
+    $('#consent-trust-hint').hidden = !offerTrust;
     const dialog = $('#dlg-consent');
     if (!dialog.open) dialog.showModal();
   });
@@ -186,7 +289,7 @@ export function initHopdesk({ api, toast, confirmDialog }) {
     if ($('#dlg-consent').open) $('#dlg-consent').close();
     if (id) void api.answerConsent(id, decision);
   };
-  $('#consent-allow').onclick = () => answer('allow');
+  $('#consent-allow').onclick = () => answer($('#consent-trust').checked ? 'allow-and-trust' : 'allow');
   $('#consent-reject').onclick = () => answer('reject');
   $('#dlg-consent').addEventListener('cancel', e => { e.preventDefault(); answer('reject'); });
 
@@ -336,12 +439,15 @@ export function initHopdesk({ api, toast, confirmDialog }) {
     ui.session = status;
     if (status.state === 'connected') {
       setConnectBusy(false);
+      void renderSaved();
       $('#cd-error').hidden = true;
       $('#cd-error-detail').hidden = true;
       showSession(status);
     } else if (status.state === 'ended') {
       setConnectBusy(false);
       hideSession();
+      // A connection may have just paired this computer with another.
+      void renderSaved();
       if (status.error) showConnectError(status.error.message);
     } else if (status.state === 'reconnecting') {
       $('#hd-status').textContent = 'Reconnecting…';
@@ -541,6 +647,7 @@ export function initHopdesk({ api, toast, confirmDialog }) {
   }
 
   void refreshHost();
+  void renderSaved();
   void api.accountState?.().then(renderAccount).catch(() => {});
   return { refreshHost };
 }
@@ -558,7 +665,7 @@ function friendlyError(message) {
   if (/rejected|user-rejected/i.test(text)) return 'The person at the other computer did not allow the connection.';
   if (/timeout/i.test(text)) return 'The other computer did not answer in time.';
   if (/code-disabled/i.test(text)) return 'That computer is not accepting connections by access code right now.';
-  if (/unattended-disabled/i.test(text)) return 'That computer does not allow unattended access.';
+  if (/not-paired/i.test(text)) return 'That computer is not paired with this one any more. Connect with its access code, and tick "Let this computer connect again without asking".';
   if (/ECONNREFUSED/i.test(text)) return 'That computer refused the connection. HopDesk may not be running there.';
   return text;
 }

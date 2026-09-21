@@ -45,7 +45,9 @@ export interface ViewerDependencies {
   iceServers?: () => Promise<unknown[]>;
   /** Known host keys, so a changed identity is noticed rather than trusted. */
   pinnedKey: (deviceId: string) => Uint8Array | undefined;
-  rememberKey: (deviceId: string, key: Uint8Array, name: string) => void;
+  rememberKey: (deviceId: string, key: Uint8Array, name: string, where?: { address?: string; port?: number; paired?: boolean }) => void;
+  /** Where this computer answered last time, when discovery finds nothing. */
+  lastAddress?: (deviceId: string) => { address: string; port?: number } | undefined;
 }
 
 export interface ConnectRequest {
@@ -54,6 +56,8 @@ export interface ConnectRequest {
   /** Optional address, for networks where discovery does not work. */
   address?: string;
   port?: number;
+  /** Set when the host has paired with this computer: no code, no prompt. */
+  paired?: boolean;
 }
 
 export class ViewerRole extends EventEmitter {
@@ -129,7 +133,25 @@ export class ViewerRole extends EventEmitter {
     return this.current();
   }
 
-  private async attemptConnect({ deviceId, code }: { deviceId: string; code: string }) {
+  /**
+   * Connects to a computer that has paired with this one: it holds this
+   * device's public key on its trusted list, so there is no code to type and
+   * nobody there has to answer. The proof is this device's signature over the
+   * handshake, which is why nothing secret has to be stored for it.
+   */
+  async connectPaired(request: { deviceId: string; address?: string; port?: number }): Promise<ViewerStatus> {
+    const deviceId = normalizeDeviceId(request.deviceId);
+    if (!deviceId) throw new Error('That is not a HopDesk Device ID. It looks like HD-7K3M-Q9TX.');
+
+    this.stopped = false;
+    this.attempt = 0;
+    this.lastRequest = { ...request, deviceId, code: '', paired: true };
+    this.grant = null;
+    await this.attemptConnect({ deviceId, code: '', paired: true });
+    return this.current();
+  }
+
+  private async attemptConnect({ deviceId, code, paired = false }: { deviceId: string; code: string; paired?: boolean }) {
     this.setStatus({ state: 'looking', deviceId, resumable: false, error: undefined, hostName: undefined, sessionId: undefined });
 
     const target = await this.locate(deviceId, this.lastRequest?.address, this.lastRequest?.port);
@@ -146,7 +168,9 @@ export class ViewerRole extends EventEmitter {
         hostId: deviceId,
         credential: this.grant
           ? { kind: 'grant', id: this.grant.id, secret: this.grant.secret }
-          : { kind: 'code', code },
+          : paired
+            ? { kind: 'paired' }
+            : { kind: 'code', code },
         ...(pinned ? { expectedHostKey: pinned } : {}),
       });
     } catch (err) {
@@ -155,13 +179,19 @@ export class ViewerRole extends EventEmitter {
       throw err;
     }
 
-    await this.startSession(session, deviceId);
+    await this.startSession(session, deviceId, target);
   }
 
   /** Everything after a successful handshake, however the link was made. */
-  private async startSession(session: ViewerSession, deviceId: string) {
+  private async startSession(session: ViewerSession, deviceId: string, where?: { address: string; port: number }) {
     this.session = session;
-    this.deps.rememberKey(deviceId, session.host.hostKey, session.host.hostName);
+    /* Where it answered and whether it will let this computer back in without
+       asking: enough to offer it as one click next time. */
+    this.deps.rememberKey(deviceId, session.host.hostKey, session.host.hostName, {
+      ...(where ?? {}),
+      paired: session.trusted,
+    });
+    if (this.lastRequest) this.lastRequest.paired = session.trusted || this.lastRequest.paired;
     if (session.grant) this.grant = session.grant;
     this.setStatus({ state: 'connecting', hostName: session.host.hostName, sessionId: session.sessionId, resumable: !!this.grant });
 
@@ -190,18 +220,26 @@ export class ViewerRole extends EventEmitter {
     this.deps.log.info(`viewer session ${session.sessionId} connected to ${deviceId}`);
   }
 
-  /** Where to reach a Device ID: an address if given, otherwise mDNS. */
+  /**
+   * Where to reach a Device ID: an address if given, otherwise mDNS, otherwise
+   * wherever it answered last time. The last address is only a hint — whoever
+   * answers there still has to prove it holds the right device key.
+   */
   private async locate(deviceId: string, address?: string, port?: number): Promise<{ address: string; port: number }> {
     if (address) return { address, port: port ?? DEFAULT_LAN_PORT };
     const hosts = await findHosts({ deviceId, timeoutMs: 3000 });
     const match = hosts.find(h => h.deviceId === deviceId);
-    if (!match) {
-      throw Object.assign(
-        new Error(`No computer with the Device ID ${deviceId} answered on this network.`),
-        { code: 'not-found' },
-      );
+    if (match) return { address: match.address, port: match.port };
+
+    const remembered = this.deps.lastAddress?.(deviceId);
+    if (remembered) {
+      this.deps.log.info(`${deviceId} did not answer discovery; trying where it answered last`);
+      return { address: remembered.address, port: remembered.port ?? DEFAULT_LAN_PORT };
     }
-    return { address: match.address, port: match.port };
+    throw Object.assign(
+      new Error(`No computer with the Device ID ${deviceId} answered on this network.`),
+      { code: 'not-found' },
+    );
   }
 
   /** The control connection dropped. Resume silently if a grant allows it. */
@@ -217,7 +255,10 @@ export class ViewerRole extends EventEmitter {
       this.setStatus({ state: 'ended', resumable: false, error: { code: deliberate, message: endMessage(deliberate) } });
       return;
     }
-    if (!request || !this.grant || this.grant.expiresAt <= Date.now() || this.attempt >= 5) {
+    /* A paired computer can always authenticate again, so it does not need a
+       grant to come back; anything else does. */
+    const canResume = request?.paired || (this.grant && this.grant.expiresAt > Date.now());
+    if (!request || !canResume || this.attempt >= 5) {
       this.setStatus({ state: 'ended', resumable: false });
       return;
     }
@@ -225,7 +266,7 @@ export class ViewerRole extends EventEmitter {
     const delay = Math.min(8000, 500 * 2 ** (this.attempt - 1));
     this.setStatus({ state: 'reconnecting' });
     this.reconnectTimer = setTimeout(() => {
-      void this.attemptConnect({ deviceId: request.deviceId, code: request.code }).catch(err => {
+      void this.attemptConnect({ deviceId: request.deviceId, code: request.code, paired: request.paired }).catch(err => {
         this.deps.log.warn(`reconnect failed: ${(err as Error).message}`);
       });
     }, delay);

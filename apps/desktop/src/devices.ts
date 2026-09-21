@@ -19,6 +19,15 @@ export interface KnownDevice {
   key: string;
   name: string;
   lastConnected: number;
+  /**
+   * Where it answered last time, so a saved computer can still be reached on a
+   * network where discovery is blocked. A hint, never a credential: the
+   * handshake authenticates whoever answers there.
+   */
+  lastAddress?: string;
+  lastPort?: number;
+  /** It told us it will let this computer in without asking. */
+  paired?: boolean;
 }
 
 export class KnownDevices {
@@ -46,6 +55,9 @@ export class KnownDevices {
           key: device.key,
           name: typeof device.name === 'string' ? device.name.slice(0, 64) : device.deviceId,
           lastConnected: typeof device.lastConnected === 'number' ? device.lastConnected : 0,
+          ...(typeof device.lastAddress === 'string' ? { lastAddress: device.lastAddress.slice(0, 255) } : {}),
+          ...(Number.isInteger(device.lastPort) ? { lastPort: device.lastPort } : {}),
+          ...(device.paired === true ? { paired: true } : {}),
         });
       }
     } catch {
@@ -64,14 +76,28 @@ export class KnownDevices {
   }
 
   /** Records a successful connection. The key is only stored the first time. */
-  remember(deviceId: string, key: Uint8Array, name: string): void {
+  remember(deviceId: string, key: Uint8Array, name: string, where?: { address?: string; port?: number; paired?: boolean }): void {
     const existing = this.devices.get(deviceId);
+    const address = where?.address ?? existing?.lastAddress;
+    const port = where?.port ?? existing?.lastPort;
     this.devices.set(deviceId, {
       deviceId,
       key: existing?.key ?? toBase64(key),
       name: name.slice(0, 64) || deviceId,
       lastConnected: Date.now(),
+      ...(address ? { lastAddress: address } : {}),
+      ...(port ? { lastPort: port } : {}),
+      // Pairing is remembered until this computer is told otherwise.
+      ...(where?.paired ?? existing?.paired ? { paired: true } : {}),
     });
+    void this.persist();
+  }
+
+  /** The host said it will not ask again — or it did ask, so it will. */
+  setPaired(deviceId: string, paired: boolean): void {
+    const device = this.devices.get(deviceId);
+    if (!device || Boolean(device.paired) === paired) return;
+    if (paired) device.paired = true; else delete device.paired;
     void this.persist();
   }
 

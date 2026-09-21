@@ -63,6 +63,9 @@ contextBridge.exposeInMainWorld('hopdesk', {
   knownDevices: () => ipcRenderer.invoke('knownDevices'),
   forgetDevice: deviceId => ipcRenderer.invoke('forgetDevice', deviceId),
   answerConsent: (id, decision) => ipcRenderer.invoke('answerConsent', id, decision),
+  trustedList: () => ipcRenderer.invoke('trustedList'),
+  trustedRemove: deviceId => ipcRenderer.invoke('trustedRemove', deviceId),
+  connectSaved: deviceId => ipcRenderer.invoke('connectSaved', deviceId),
   onHostStatus: handler => {
     ipcRenderer.on('hostStatus', (_event, payload) => handler(payload));
   },

@@ -25,13 +25,15 @@ const grantId = b64({ bytes: 16 });
 /**
  * How a viewer is authorised.
  *
- * `code` and `unattended` are secrets someone typed, run through SPAKE2.
- * `grant` resumes an already-approved session. `account` is for two computers
- * on the same HopDesk account: there is no secret to type, so it uses a signed
- * ephemeral exchange instead, authorised by the account and authenticated by
- * the device keys.
+ * `code` is the six digits someone typed, run through SPAKE2. `grant` resumes
+ * an already-approved session. `paired` and `account` have no secret to type,
+ * so both use a signed ephemeral exchange instead: `paired` is authorised by
+ * the host's own list of devices it has been told to trust, `account` by two
+ * computers belonging to the same HopDesk account. Both are authenticated by
+ * the device keys, which is what a stored password could never do — see
+ * docs/ARCHITECTURE.md on why the password path was removed.
  */
-export const AUTH_KINDS = ['code', 'grant', 'unattended', 'account'] as const;
+export const AUTH_KINDS = ['code', 'grant', 'paired', 'account'] as const;
 export type AuthKind = typeof AUTH_KINDS[number];
 
 export const helloMessage = obj({
@@ -48,7 +50,7 @@ export const helloMessage = obj({
   grantId: optional(grantId),
   /** SPAKE2 share, for the kinds that use a typed secret. */
   share: optional(share),
-  /** Ephemeral X25519 public key, for `account`. */
+  /** Ephemeral X25519 public key, for `paired` and `account`. */
   dh: optional(b64({ bytes: 32 })),
   signature: optional(signature),
 });
@@ -72,7 +74,7 @@ export const confirmMessage = obj({
 
 export const HANDSHAKE_ERRORS = [
   'unsupported-version', 'unknown-device', 'rate-limited', 'bad-auth', 'grant-invalid',
-  'unattended-disabled', 'code-disabled', 'not-authorised', 'replay', 'clock-skew', 'busy', 'protocol',
+  'not-paired', 'code-disabled', 'not-authorised', 'replay', 'clock-skew', 'busy', 'protocol',
 ] as const;
 export type HandshakeErrorCode = typeof HANDSHAKE_ERRORS[number];
 
@@ -121,6 +123,8 @@ export const controlMessage = tagged('type', {
     sessionId: optional(b64({ bytes: 16 })),
     /** Lets this viewer reconnect to this session without asking again. */
     grant: optional(obj({ id: grantId, secret: b64({ bytes: 32 }), expiresAt: int(0, Number.MAX_SAFE_INTEGER) })),
+    /** The host trusts this viewer: it may connect again with no code and no prompt. */
+    trusted: optional(bool),
   }),
   'rtc-offer': obj({ type: literal('rtc-offer'), sdp }),
   'rtc-answer': obj({ type: literal('rtc-answer'), sdp }),

@@ -4,9 +4,10 @@ import {
   type ConsentDecision, type ConsentRequest, type EndReason, type HostSession, type MessageLink,
 } from '@hopdesk/protocol';
 import { LanListener, HopdeskAnnouncer, negotiateAsHost } from '@hopdesk/transport';
-import { generateAccessCode, fromBase64, bytesToBigInt } from '@hopdesk/crypto';
+import { generateAccessCode } from '@hopdesk/crypto';
 import type { InputController } from '@hopdesk/platform';
 import { InputStats } from './input-stats.js';
+import { fingerprint, type TrustedDevices } from './trusted.js';
 import { keysymFor } from './keysym.js';
 import type { RemoteAccessSettings } from '@hopdesk/core';
 import type { LocalIdentity } from './identity.js';
@@ -44,7 +45,8 @@ export interface HostStatus {
   accessCode: string | null;
   port: number;
   announcing: boolean;
-  unattended: boolean;
+  /** Computers allowed to connect without a code and without anyone answering. */
+  trusted: { deviceId: string; name: string; fingerprint: string; lastUsed: number; expiresAt: number }[];
   keyProtection: string;
   detail?: string;
   sessions: HostSessionInfo[];
@@ -57,6 +59,8 @@ export interface HostDependencies {
   settings: () => RemoteAccessSettings;
   /** Asks the person at this computer. Must not resolve 'allow' by itself. */
   consent: (request: ConsentRequest, signal: AbortSignal) => Promise<ConsentDecision>;
+  /** The computers this one trusts to connect without asking. */
+  trusted: () => TrustedDevices;
   /** Creates the hidden renderer that captures the screen and holds the peer connection. */
   createPeer: (sessionId: string, iceServers: unknown[]) => Promise<{ peer: RtcPeerHandle; close: () => void }>;
   /** The platform's input injector, or null when input cannot be injected. */
@@ -115,7 +119,10 @@ export class HostRole extends EventEmitter {
       accessCode: this.listener ? this.code : null,
       port: settings.port,
       announcing: this.announcing,
-      unattended: settings.unattended,
+      trusted: this.deps.trusted().list().map(d => ({
+        deviceId: d.deviceId, name: d.name, fingerprint: fingerprint(d.key),
+        lastUsed: d.lastUsed, expiresAt: d.expiresAt,
+      })),
       keyProtection: this.deps.identity.protectionDetail,
       ...(this.detail ? { detail: this.detail } : {}),
       sessions: [...this.sessions.values()].map(s => ({ ...s.info })),
@@ -139,11 +146,7 @@ export class HostRole extends EventEmitter {
         this.deps.log.warn('access code replaced after repeated failed attempts');
         this.emit('change');
       },
-      unattended: () => {
-        const s = this.deps.settings();
-        if (!s.unattended || !s.unattendedVerifier) return null;
-        try { return fromBase64(s.unattendedVerifier); } catch { return null; }
-      },
+      trusts: (viewerId, viewerKey) => this.deps.trusted().trusts(viewerId, viewerKey),
       accountAuthorised: (viewerId, viewerKey) => this.deps.accountAuthorised?.(viewerId, viewerKey) ?? false,
     });
 
@@ -215,6 +218,22 @@ export class HostRole extends EventEmitter {
     this.emit('change');
   }
 
+  /**
+   * Stops trusting a device and disconnects it if it is connected right now.
+   * Revoking while someone is watching your screen has to mean they stop.
+   */
+  revokeTrust(deviceId: string): boolean {
+    const removed = this.deps.trusted().remove(deviceId);
+    for (const running of [...this.sessions.values()]) {
+      if (running.info.viewerId === deviceId) this.endSession(running.info.id, 'revoked');
+    }
+    if (removed) {
+      this.deps.log.info(`no longer trusting ${deviceId} (${removed.name})`);
+      this.emit('change');
+    }
+    return removed !== null;
+  }
+
   /* --------------------------------------------------------- one session */
 
   /**
@@ -233,7 +252,14 @@ export class HostRole extends EventEmitter {
         authorize: (request, signal) => this.deps.consent(request, signal),
         /* Unattended access is what stands in for someone answering, so it
            covers connections from this account's own computers too. */
-        needsConsent: kind => kind === 'code' || (kind === 'account' && !this.deps.settings().unattended),
+        /* `paired` never asks: being on the trusted list is the answer, given
+           once by the person here. `grant` resumes a session already allowed. */
+        needsConsent: kind => kind === 'code' || kind === 'account',
+        onTrust: viewer => {
+          const device = this.deps.trusted().add(viewer);
+          this.deps.log.info(`trusting ${device.deviceId} (${device.name}); it can now connect without asking`);
+          this.emit('change');
+        },
       });
     } catch (err) {
       const code = err instanceof HandshakeError ? err.code : 'error';
@@ -257,6 +283,9 @@ export class HostRole extends EventEmitter {
     this.sessions.set(session.sessionId, running);
     this.emit('change');
     this.deps.log.info(`session ${session.sessionId} authorised for ${info.viewerId} (${session.viewer.auth})`);
+    // Using a pairing keeps it alive; one nobody uses expires on its own.
+    if (session.viewer.auth === 'paired') this.deps.trusted().renew(session.viewer.viewerId);
+    this.emit('connected', { ...info, auth: session.viewer.auth });
 
     session.control.onClose(() => {
       if (this.sessions.has(session.sessionId)) {
@@ -434,15 +463,7 @@ export class HostRole extends EventEmitter {
   }
 }
 
-/** Unattended access stores the scalar; this checks it is a usable one. */
-export function unattendedVerifierLooksValid(base64: string): boolean {
-  try {
-    const scalar = bytesToBigInt(fromBase64(base64));
-    return scalar > 0n;
-  } catch {
-    return false;
-  }
-}
+
 
 /**
  * A viewer's key message mapped to an X11 keysym — the same table the viewer

@@ -2,24 +2,25 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { generateIdentity, deviceIdFromPublicKey, toBase64, fromBase64 } from '@hopdesk/crypto';
 import {
-  HostAuthenticator, GrantStore, AttemptLimiter, acceptViewer, connectToHost, unattendedVerifier, HandshakeError,
+  HostAuthenticator, GrantStore, AttemptLimiter, acceptViewer, connectToHost, HandshakeError,
 } from '../dist/index.js';
 import { linkPair } from './helpers/link.mjs';
 
 function makeHost(overrides = {}) {
   const identity = generateIdentity();
-  const state = { code: '739421', rotations: 0, prompts: [], decision: 'allow', unattended: null };
+  const state = { code: '739421', rotations: 0, prompts: [], decision: 'allow', trusted: [] };
   const grants = new GrantStore();
   const auth = new HostAuthenticator({
     identity, hostName: 'Office PC', grants,
     accessCode: () => state.code,
     rotateAccessCode: () => { state.rotations++; state.code = '000111'; },
-    unattended: () => state.unattended,
+    trusts: (viewerId, viewerKey) => state.trusted.some(k => toBase64(k) === toBase64(viewerKey)),
     ...overrides,
   });
   const accept = (link, opts = {}) => acceptViewer(link, auth, {
     grants,
     authorize: async (request) => { state.prompts.push(request); return typeof state.decision === 'function' ? state.decision() : state.decision; },
+    onTrust: viewer => { state.trusted.push(viewer.viewerKey); },
     ...opts,
   });
   return { identity, id: deviceIdFromPublicKey(identity.publicKey), auth, grants, state, accept };
@@ -137,17 +138,55 @@ test('a grant reconnects the same viewer without asking again; other viewers and
   assert.equal(revoked.v.reason.code, 'grant-invalid');
 });
 
-test('unattended access is refused unless enabled, then works without a prompt', async () => {
+test('a device is refused until it is trusted, and then connects with no prompt', async () => {
   const host = makeHost();
-  const cred = { kind: 'unattended', password: 'correct horse battery' };
-  assert.equal((await run(host, { credential: cred })).v.reason.code, 'unattended-disabled');
 
-  host.state.unattended = await unattendedVerifier('correct horse battery', host.id);
-  const ok = await run(host, { credential: cred });
-  assert.equal(ok.v.status, 'fulfilled', ok.v.reason?.stack);
-  assert.equal(host.state.prompts.length, 0);
-  ok.v.value.control.close();
-  assert.equal((await run(host, { credential: { kind: 'unattended', password: 'wrong' } })).v.reason.code, 'bad-auth');
+  /* Before pairing there is nothing to be trusted by. */
+  assert.equal((await run(host, { credential: { kind: 'paired' } })).v.reason.code, 'not-paired');
+
+  /* Pairing: an ordinary code connection the person allows *and* trusts. */
+  host.state.decision = 'allow-and-trust';
+  const first = await run(host);
+  assert.equal(first.v.status, 'fulfilled', first.v.reason?.stack);
+  first.v.value.control.close();
+  assert.equal(host.state.trusted.length, 1, 'the viewer key was not remembered');
+
+  /* From now on: no code, no prompt. */
+  const promptsBefore = host.state.prompts.length;
+  const paired = await run(host, { credential: { kind: 'paired' } });
+  assert.equal(paired.v.status, 'fulfilled', paired.v.reason?.stack);
+  assert.equal(host.state.prompts.length, promptsBefore, 'a paired connection asked anyway');
+  assert.equal(paired.v.value.host.hostId, host.id);
+  paired.v.value.control.close();
+
+  /* Only that device: another computer's key is not on the list. */
+  const stranger = await run(host, {
+    identity: generateIdentity(), credential: { kind: 'paired' },
+  });
+  assert.equal(stranger.v.reason.code, 'not-paired');
+
+  /* And revoking it closes the door again. */
+  host.state.trusted.length = 0;
+  assert.equal((await run(host, { credential: { kind: 'paired' } })).v.reason.code, 'not-paired');
+});
+
+test('a paired connection is a real exchange: fresh keys each time, and no secret to steal', async () => {
+  const host = makeHost();
+  host.state.trusted.push(viewerIdentity.publicKey);
+
+  const one = await run(host, { credential: { kind: 'paired' } });
+  const two = await run(host, { credential: { kind: 'paired' } });
+  assert.equal(one.v.status, 'fulfilled', one.v.reason?.stack);
+  assert.equal(two.v.status, 'fulfilled', two.v.reason?.stack);
+  assert.notDeepEqual(one.v.value.root, two.v.value.root, 'two sessions derived the same key');
+  one.v.value.control.close();
+  two.v.value.control.close();
+
+  /* What the host stores is a public key. Anyone who reads it still cannot
+     connect, because the proof is a signature by the private half. */
+  const stolen = { ...viewerIdentity, secretKey: generateIdentity().secretKey };
+  const forged = await run(host, { identity: stolen, credential: { kind: 'paired' } });
+  assert.notEqual(forged.v.status, 'fulfilled', 'a stolen public key was enough to connect');
 });
 
 test('turning off access by code refuses code connections', async () => {
@@ -391,7 +430,7 @@ test('each account exchange derives fresh keys, and a replayed hello is refused'
   await assert.rejects(hostSide, err => err.code === 'replay');
 });
 
-test('a computer on the account still has to be allowed, unless unattended access is on', async () => {
+test('a computer on the account still has to be allowed, unless the host trusts it', async () => {
   const host = makeHost({ accountAuthorised: () => true });
 
   /* The default: an account connection asks the person at the host, exactly as
@@ -407,11 +446,11 @@ test('a computer on the account still has to be allowed, unless unattended acces
   allowed.v.value.control.close();
   assert.equal(host.state.prompts.length, 2);
 
-  /* A host that has opted into unattended access has already answered: those
-     connections go through without anyone present. */
-  const unattended = makeHost({ accountAuthorised: () => true });
-  const silent = await run(unattended, { credential: { kind: 'account' } }, { needsConsent: kind => kind === 'code' });
+  /* A host whose policy says this kind needs no prompt — what trusting the
+     other computer does — lets it through with nobody present. */
+  const trusting = makeHost({ accountAuthorised: () => true });
+  const silent = await run(trusting, { credential: { kind: 'account' } }, { needsConsent: kind => kind === 'code' });
   assert.equal(silent.v.status, 'fulfilled', silent.v.reason?.stack);
-  assert.equal(unattended.state.prompts.length, 0, 'unattended access still prompted');
+  assert.equal(trusting.state.prompts.length, 0, 'a trusted account connection still prompted');
   silent.v.value.control.close();
 });

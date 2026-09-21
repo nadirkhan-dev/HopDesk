@@ -155,6 +155,11 @@
   #cd-more > summary { font-size: 12px; color: var(--text-dim); cursor: pointer; margin-top: 8px; }
   .hd-view { flex: 1; display: flex; flex-direction: column; background: #000; min-width: 0; }
   .hd-bar { display: flex; align-items: center; gap: 8px; padding: 6px 10px; background: var(--surface); border-bottom: 1px solid var(--border); }
+  .saved-row { display: flex; align-items: center; gap: 8px; padding: 8px 0; border-bottom: 1px solid var(--border, #333); }
+  .saved-row:last-child { border-bottom: none; }
+  .saved-row .who { flex: 1; min-width: 0; }
+  .saved-row .who b { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .saved-row .who span { font-size: 12px; color: var(--text-dim, #aaa); }
   .perms { margin-top: 10px; display: grid; gap: 8px; }
   .perm { border: 1px solid var(--border, #444); border-radius: 8px; padding: 8px 10px; font-size: 13px; }
   .perm .perm-head { display: flex; align-items: center; gap: 8px; font-weight: 600; }
@@ -357,7 +362,19 @@
       <button class="btn small" id="mine-fix" hidden>Open System Settings</button>
       <!-- macOS: every permission hosting needs, allowed or not. -->
       <div class="perms" id="mine-perms" hidden></div>
+      <!-- Computers allowed in without asking, and how to stop trusting them. -->
+      <details class="section" id="mine-trusted" hidden>
+        <summary>Computers you trust</summary>
+        <p class="hint" id="mine-trusted-hint">These can connect at any time without an access code and without asking.</p>
+        <div id="mine-trusted-list"></div>
+      </details>
       <div id="mine-sessions" hidden></div>
+    </section>
+
+    <!-- Computers that paired with this one: one click, no code. -->
+    <section class="card" id="saved" hidden>
+      <div class="card-head">SAVED COMPUTERS</div>
+      <div id="saved-list"></div>
     </section>
 
     <section class="card" id="connect">
@@ -605,6 +622,14 @@
   <p><strong id="consent-who">A computer</strong> wants to see and control this computer.</p>
   <p class="hint mono" id="consent-id"></p>
   <p class="hint" id="consent-method"></p>
+  <label class="check" id="consent-trust-wrap">
+    <input type="checkbox" id="consent-trust">
+    Let this computer connect again without asking
+  </label>
+  <p class="hint" id="consent-trust-hint">
+    It will be able to see and control this computer at any time, even when nobody is here.
+    You can stop it later under "Computers you trust".
+  </p>
   <menu>
     <button class="btn" id="consent-reject" autofocus>Reject</button>
     <button class="btn primary" id="consent-allow">Allow</button>

@@ -13,10 +13,10 @@ import { DEFAULT_OPTIONS, type ConnectionOptions } from './connections.js';
  */
 
 /**
- * Letting other computers connect to this one. Off until the user turns it on,
- * and unattended access off separately: an access code with someone present to
- * allow the connection is a different decision from letting a saved password in
- * while nobody is watching.
+ * Letting other computers connect to this one. Off until the user turns it on.
+ * Which computers may connect without anyone answering a prompt is not kept
+ * here but in the trusted list (apps/desktop/src/trusted.ts), because that is a
+ * list of public keys rather than a setting.
  */
 export interface RemoteAccessSettings {
   enabled: boolean;
@@ -24,14 +24,6 @@ export interface RemoteAccessSettings {
   port: number;
   /** Announce this computer on the local network so it can be found by name. */
   announce: boolean;
-  /** Allow connections with a stored password and no one present to allow them. */
-  unattended: boolean;
-  /**
-   * The SPAKE2 scalar derived from the unattended password, base64. Not the
-   * password, and not a password hash that can be replayed as one: it is what
-   * this computer needs to complete the handshake. Never sent anywhere.
-   */
-  unattendedVerifier?: string;
 }
 
 /** The HopDesk server this computer is signed in to, if any. Not secret. */
@@ -61,7 +53,6 @@ export const DEFAULT_REMOTE_ACCESS: RemoteAccessSettings = {
   enabled: false,
   port: DEFAULT_HOST_PORT,
   announce: true,
-  unattended: false,
 };
 
 const DEFAULT_KEYS = ['scaling', 'fullscreenOnConnect', 'viewOnly', 'shareClipboard', 'enableAudio', 'autoReconnect'] as const;
@@ -159,16 +150,13 @@ function sanitizeRemoteAccess(input: unknown): RemoteAccessSettings {
   const raw = input as Record<string, unknown>;
   if (typeof raw.enabled === 'boolean') out.enabled = raw.enabled;
   if (typeof raw.announce === 'boolean') out.announce = raw.announce;
-  if (typeof raw.unattended === 'boolean') out.unattended = raw.unattended;
   if (Number.isInteger(raw.port) && (raw.port as number) >= 1024 && (raw.port as number) <= 65535) {
     out.port = raw.port as number;
   }
-  // 32 bytes, base64: the scalar written by the app itself.
-  if (typeof raw.unattendedVerifier === 'string' && /^[A-Za-z0-9+/]{43}=$/.test(raw.unattendedVerifier)) {
-    out.unattendedVerifier = raw.unattendedVerifier;
-  }
-  // Unattended access without a verifier would be an open door.
-  if (!out.unattendedVerifier) out.unattended = false;
+  /* There was once an "unattended access" password here, stored as the SPAKE2
+     scalar. That scalar *was* the credential: anyone who could read this file
+     could connect. Trusted device keys replaced it (apps/desktop/src/trusted.ts),
+     and any leftover fields are dropped on load rather than honoured. */
   return out;
 }
 
