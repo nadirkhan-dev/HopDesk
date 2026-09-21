@@ -479,12 +479,24 @@ app.whenReady().then(async () => {
     && contents !== null
     && hostWindow !== null && !hostWindow.isDestroyed() && contents === hostWindow.webContents
     && settings.get().remoteAccess.enabled;
+  /* A session shown full screen, with every key going to the other computer,
+     needs three permissions of its own — and only for HopDesk's own window.
+     Chromium leaves a denied requestFullscreen() promise pending forever, so
+     refusing these looked exactly like a button that does nothing. */
+  const SESSION_PERMISSIONS = ['fullscreen', 'keyboardLock', 'pointerLock'];
+  const allowForUi = (contents: Electron.WebContents | null, permission: string) =>
+    SESSION_PERMISSIONS.includes(permission)
+    && contents !== null
+    && window !== null && !window.isDestroyed() && contents === window.webContents;
+
   electronSession.defaultSession.setPermissionRequestHandler((wc, permission, callback, details) => {
     const mediaTypes = (details as { mediaTypes?: string[] } | undefined)?.mediaTypes;
-    callback(allowCapture(wc, permission, mediaTypes?.includes('audio') ? 'audio' : undefined));
+    callback(allowForUi(wc, permission)
+      || allowCapture(wc, permission, mediaTypes?.includes('audio') ? 'audio' : undefined));
   });
   electronSession.defaultSession.setPermissionCheckHandler((wc, permission, _origin, details) =>
-    allowCapture(wc, permission, (details as { mediaType?: string } | undefined)?.mediaType));
+    allowForUi(wc, permission)
+    || allowCapture(wc, permission, (details as { mediaType?: string } | undefined)?.mediaType));
 
   /* getDisplayMedia asks the application which screen to share: the Host shares
      the primary display. Answering it here means no picker appears on a machine
