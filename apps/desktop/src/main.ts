@@ -392,17 +392,26 @@ function createRoles(identity: LocalIdentity) {
       read: () => clipboard.readText(),
       write: text => clipboard.writeText(text),
     },
-    displaySize: () => {
-      const injector = inputController;
-      if (injector && 'width' in injector) {
-        const sized = injector as InputController & { width: number; height: number };
-        return { width: sized.width, height: sized.height };
-      }
-      // Physical pixels, which is what input coordinates are in.
+    /**
+     * Where the shared screen is, in the coordinates input is injected in.
+     *
+     * The viewer sends a fraction of the screen it can see, which is one
+     * display. On a computer with two, that display may not start at 0,0 —
+     * spreading those fractions across the whole desktop put the pointer on
+     * the *other* monitor, which is what happened here with a laptop screen
+     * to the right of an external one.
+     *
+     * X11 injects in pixels across the whole X screen; macOS injects in points
+     * in the same global space Electron reports bounds in.
+     */
+    displayBounds: () => {
       const display = screen.getPrimaryDisplay();
+      const perPixel = process.platform === 'darwin' ? 1 : display.scaleFactor;
       return {
-        width: Math.round(display.size.width * display.scaleFactor),
-        height: Math.round(display.size.height * display.scaleFactor),
+        x: Math.round(display.bounds.x * perPixel),
+        y: Math.round(display.bounds.y * perPixel),
+        width: Math.round(display.size.width * perPixel),
+        height: Math.round(display.size.height * perPixel),
       };
     },
     shareClipboard: () => settings.get().defaults.shareClipboard !== false,

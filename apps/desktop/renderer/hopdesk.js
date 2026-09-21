@@ -7,6 +7,7 @@
  * RDP). The two share the window but nothing else.
  */
 import { createPeerSession, servePeerCalls } from './peer.js';
+import { pointToRemote, nearestRemotePoint, pictureRect, MODES } from './geometry.js';
 
 const $ = sel => document.querySelector(sel);
 
@@ -20,6 +21,8 @@ export function initHopdesk({ api, toast, confirmDialog }) {
     video: null,
     peer: null,
     stats: null,
+    /** How the other computer's screen is shown: fit, fill or actual (1:1). */
+    scale: 'fit',
     clipboardSeq: 0,
     lastClipboardSent: '',
   };
@@ -462,6 +465,7 @@ export function initHopdesk({ api, toast, confirmDialog }) {
   /* --------------------------------------------------- the session view */
 
   function showSession(status) {
+    applyScale();
     document.body.classList.add('hd-session');
     $('#hd-view').hidden = false;
     $('#hd-name').textContent = status.hostName || status.deviceId;
@@ -490,6 +494,8 @@ export function initHopdesk({ api, toast, confirmDialog }) {
   }
 
   function hideSession() {
+    if (document.fullscreenElement) void document.exitFullscreen().catch(() => {});
+    hideRemoteCursor();
     $('#hd-notice').hidden = true;
     document.body.classList.remove('hd-session');
     $('#hd-view').hidden = true;
@@ -498,10 +504,105 @@ export function initHopdesk({ api, toast, confirmDialog }) {
   }
 
   $('#hd-disconnect').onclick = () => { void api.disconnectDevice(); };
-  $('#hd-fullscreen').onclick = () => {
-    if (document.fullscreenElement) void document.exitFullscreen();
-    else void $('#hd-view').requestFullscreen().catch(() => {});
+
+  /* ---------------------------------------- full screen and how it is shown */
+
+  /**
+   * Real full screen, with every key going to the other computer.
+   *
+   * Keyboard lock is what stops this computer from swallowing Cmd, Alt+Tab and
+   * the rest; the browser only grants it in full screen, and holding Escape
+   * still leaves, which is why Ctrl+Alt+Enter exists as a way out that no
+   * remote application wants.
+   */
+  async function toggleFullscreen() {
+    const view = $('#hd-view');
+    if (document.fullscreenElement) {
+      try { navigator.keyboard?.unlock?.(); } catch { /* not supported here */ }
+      await document.exitFullscreen().catch(() => {});
+      return;
+    }
+    try {
+      await view.requestFullscreen();
+    } catch (err) {
+      toast(`This computer would not let HopDesk go full screen: ${err.message}`);
+      return;
+    }
+    try {
+      // Named keys, because lock() with no argument takes the lot and browsers
+      // are stricter about that; these are the ones a desktop would steal.
+      await navigator.keyboard?.lock?.(['Escape', 'Tab', 'MetaLeft', 'MetaRight',
+        'AltLeft', 'AltRight', 'ControlLeft', 'ControlRight', 'F11']);
+    } catch {
+      toast('Some keys, like Cmd and Alt+Tab, will stay on this computer.');
+    }
+    ui.video?.focus();
+  }
+
+  $('#hd-fullscreen').onclick = () => { void toggleFullscreen(); };
+
+  document.addEventListener('fullscreenchange', () => {
+    const immersive = Boolean(document.fullscreenElement);
+    $('#hd-view').classList.toggle('immersive', immersive);
+    $('#hd-fullscreen').textContent = immersive ? 'Leave full screen' : 'Fullscreen';
+    if (!immersive) { try { navigator.keyboard?.unlock?.(); } catch { /* fine */ } }
+    peekToolbar(immersive);          // shown briefly, then out of the way
+    applyScale();
+    ui.video?.focus();
+  });
+
+  /* In full screen the toolbar hides; touching the top edge slides it back. */
+  let peekTimer = null;
+  function peekToolbar(show) {
+    const view = $('#hd-view');
+    clearTimeout(peekTimer);
+    view.classList.toggle('peek', show);
+    if (show && document.fullscreenElement) {
+      peekTimer = setTimeout(() => view.classList.remove('peek'), 2500);
+    }
+  }
+  $('#hd-view').addEventListener('mousemove', e => {
+    if (!document.fullscreenElement) return;
+    const nearTop = e.clientY <= 4;
+    const overBar = e.target.closest?.('.hd-bar');
+    if (nearTop || overBar) peekToolbar(true);
+    else if (!overBar && e.clientY > 60) $('#hd-view').classList.remove('peek');
+  });
+
+  /** Fit, Fill or 1:1 — the same words the pointer mapping uses. */
+  function applyScale() {
+    const video = ui.video;
+    if (!video) return;
+    for (const mode of MODES) video.classList.toggle(mode, mode === ui.scale);
+    $('#hd-scale').value = ui.scale;
+  }
+  $('#hd-scale').onchange = () => {
+    ui.scale = MODES.includes($('#hd-scale').value) ? $('#hd-scale').value : 'fit';
+    applyScale();
+    ui.video?.focus();
   };
+
+  /* The other computer's pointer, drawn here. A Mac does not put its cursor in
+     the video, so without this the mouse looks dead however well it works. */
+  function showRemoteCursor(at) {
+    const video = ui.video;
+    const cursor = $('#hd-cursor');
+    if (!video || !cursor) return;
+    if (!video.videoWidth || !video.videoHeight) return;
+    const box = video.getBoundingClientRect();
+    const stage = $('#hd-stage').getBoundingClientRect();
+    const picture = pictureRect(ui.scale, { left: 0, top: 0, width: box.width, height: box.height },
+      { width: video.videoWidth, height: video.videoHeight });
+    cursor.style.left = `${box.left - stage.left + picture.left + at.x * picture.width}px`;
+    cursor.style.top = `${box.top - stage.top + picture.top + at.y * picture.height}px`;
+    cursor.hidden = false;
+    $('#hd-stage').classList.add('controlling');
+  }
+  function hideRemoteCursor() {
+    $('#hd-cursor').hidden = true;
+    $('#hd-stage').classList.remove('controlling');
+  }
+
   $('#hd-send-clipboard').onclick = async () => {
     const text = await api.viewerClipboardRead();
     if (!text) { toast('This computer\'s clipboard is empty.'); return; }
@@ -607,23 +708,29 @@ export function initHopdesk({ api, toast, confirmDialog }) {
     if (video.dataset.wired === 'yes') return;
     video.dataset.wired = 'yes';
 
-    const position = e => {
-      const r = video.getBoundingClientRect();
-      // Normalised, so the host's resolution can change without misplacing clicks.
-      const x = Math.min(1, Math.max(0, (e.clientX - r.left) / Math.max(1, r.width)));
-      const y = Math.min(1, Math.max(0, (e.clientY - r.top) / Math.max(1, r.height)));
-      return { x, y };
+    /* Measured against the *picture*, not the element: with the screen
+       letterboxed the two differ by the size of the bars, which put every
+       click out and made the bottom row — the Dock — unreachable. */
+    const position = (e, { nearest = false } = {}) => {
+      const box = video.getBoundingClientRect();
+      const point = { x: e.clientX - box.left, y: e.clientY - box.top };
+      const size = { width: video.videoWidth, height: video.videoHeight };
+      const map = nearest ? nearestRemotePoint : pointToRemote;
+      return map(point, ui.scale, { left: 0, top: 0, width: box.width, height: box.height }, size);
     };
     const pointer = (e, buttons) => {
-      const { x, y } = position(e);
-      sendInput({ type: 'pointer', x, y, buttons: buttons ?? e.buttons });
+      // While a button is held, a stray onto a bar still drags the far edge.
+      const at = position(e, { nearest: (buttons ?? e.buttons) !== 0 });
+      if (!at) return;                       // over a bar, not over the screen
+      showRemoteCursor(at);
+      sendInput({ type: 'pointer', x: at.x, y: at.y, buttons: buttons ?? e.buttons });
     };
 
     video.addEventListener('mousemove', e => pointer(e));
     video.addEventListener('mousedown', e => { e.preventDefault(); video.focus(); pointer(e); });
     video.addEventListener('mouseup', e => { e.preventDefault(); pointer(e); });
     video.addEventListener('contextmenu', e => e.preventDefault());
-    video.addEventListener('mouseleave', e => pointer(e, 0));
+    video.addEventListener('mouseleave', e => { hideRemoteCursor(); pointer(e, 0); });
     video.addEventListener('wheel', e => {
       e.preventDefault();
       // Pixels to wheel clicks, the unit the host injects.
@@ -631,8 +738,11 @@ export function initHopdesk({ api, toast, confirmDialog }) {
     }, { passive: false });
 
     const send = (e, down) => {
-      // HopDesk's own shortcut for leaving a fullscreen session stays local.
-      if (down && e.ctrlKey && e.altKey && e.key === 'Enter') { $('#hd-fullscreen').click(); return; }
+      /* Two shortcuts stay on this computer, and nothing else does. Ctrl+Alt+Enter
+         leaves full screen — it has to be something no remote application wants,
+         because in full screen even Cmd and Alt+Tab go to the other computer. */
+      if (down && e.ctrlKey && e.altKey && e.key === 'Enter') { toggleFullscreen(); return; }
+      if (down && e.key === 'F11') { toggleFullscreen(); return; }
       e.preventDefault();
       sendInput({ type: 'key', code: e.code, key: e.key.length <= 8 ? e.key : '', down });
     };

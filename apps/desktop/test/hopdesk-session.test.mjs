@@ -488,6 +488,73 @@ test('pairing once, then connecting with one click: no code, no prompt, and revo
   }
 });
 
+test('the edges of the other computer\'s screen are reachable, letterboxed or not',
+  { skip, timeout: 180_000 }, async () => {
+  /* The bug: pointer positions were measured against the video *element*, which
+     is bigger than the picture when the shapes differ. Clicks landed high, and
+     the bottom row — a Mac's Dock — could not be reached at all. */
+  const host = await startHost();
+  const viewer = await startViewer();
+  try {
+    await connect(viewer, host);
+    await host.waitFor(`return document.querySelector('#dlg-consent')?.open === true`, 25_000, 'the Allow prompt');
+    await allow(host);
+    await viewer.waitFor(`const v = document.querySelector('#hd-video'); return v.videoWidth > 0 && v.readyState >= 2`,
+      45_000, 'video');
+
+    const shape = await viewer.eval(`
+      const v = document.querySelector('#hd-video');
+      const box = v.getBoundingClientRect();
+      return { boxW: box.width, boxH: box.height, videoW: v.videoWidth, videoH: v.videoHeight };`);
+    assert.ok(shape.videoW > 0, 'no video size');
+
+    const probe = new X11Input({ display: hostDisplay });
+    try {
+      const spots = [
+        ['top left', 0, 0], ['top right', 1, 0], ['bottom left', 0, 1],
+        ['bottom right', 1, 1], ['bottom middle', 0.5, 1], ['centre', 0.5, 0.5],
+      ];
+      for (const [name, fx, fy] of spots) {
+        // Somewhere else first, so an unmoved pointer cannot pass as a hit.
+        probe.movePointer(Math.round(probe.width / 2), Math.round(probe.height / 2));
+
+        // Where that fraction of the picture is on this screen.
+        const at = await viewer.eval(`
+          const { pictureRect } = await import('./geometry.js');
+          const v = document.querySelector('#hd-video');
+          const box = v.getBoundingClientRect();
+          const p = pictureRect('fit', { left: 0, top: 0, width: box.width, height: box.height },
+            { width: v.videoWidth, height: v.videoHeight });
+          const fx = ${fx}, fy = ${fy};
+          /* The centre of the first or last pixel, not the boundary itself:
+             a boundary rounds onto the letterbox bar, which is deliberately
+             not a point on the remote screen. */
+          const edge = (f, size) => (f === 0 ? 0.75 : f === 1 ? size - 0.75 : f * size);
+          return { x: box.left + p.left + edge(fx, p.width), y: box.top + p.top + edge(fy, p.height) };`);
+        await viewer.cdp.send('Input.dispatchMouseEvent', { type: 'mouseMoved', x: at.x, y: at.y });
+
+        const wantX = Math.round(fx * (probe.width - 1));
+        const wantY = Math.round(fy * (probe.height - 1));
+        const slack = Math.max(4, Math.round(probe.width * 0.02));
+        const landed = await waitFor(() => {
+          const p = probe.pointerPosition();
+          return Math.abs(p.x - wantX) <= slack && Math.abs(p.y - wantY) <= slack ? p : null;
+        }, 8_000, `${name}: the host pointer to reach ${wantX},${wantY}`
+          + ` (video ${shape.videoW}x${shape.videoH} shown in ${Math.round(shape.boxW)}x${Math.round(shape.boxH)})`);
+        assert.ok(landed, name);
+        if (fy === 1) {
+          assert.equal(landed.y, probe.height - 1, `${name}: the very bottom row was not reached`);
+        }
+      }
+    } finally {
+      probe.close();
+    }
+  } finally {
+    await viewer.close();
+    await host.close();
+  }
+});
+
 /* --------------------------------------------------------------- helpers */
 
 /** A TCP proxy whose connections the test can destroy on demand. */

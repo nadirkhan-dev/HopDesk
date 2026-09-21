@@ -79,7 +79,8 @@ export interface HostDependencies {
   iceServers?: () => Promise<unknown[]>;
   clipboard: { read(): Promise<string>; write(text: string): Promise<void> };
   /** Size of the display being shared, for turning normalised pointer positions into pixels. */
-  displaySize: () => { width: number; height: number };
+  /** The shared display, where input coordinates are measured from. */
+  displayBounds: () => { x: number; y: number; width: number; height: number };
   shareClipboard: () => boolean;
 }
 
@@ -354,10 +355,16 @@ export class HostRole extends EventEmitter {
       return;
     }
     try {
-      const { width, height } = this.deps.displaySize();
+      const screen = this.deps.displayBounds();
       switch (message.type) {
         case 'pointer': {
-          input.movePointer(message.x * (width - 1), message.y * (height - 1));
+          /* A fraction of the shared display, placed on that display: its
+             origin matters when it is not the only one. `- 1` so a fraction of
+             exactly 1 is the last pixel — the edge the Dock and menu bar are on. */
+          input.movePointer(
+            screen.x + message.x * (screen.width - 1),
+            screen.y + message.y * (screen.height - 1),
+          );
           const buttons = message.buttons;
           for (const button of [1, 2, 3] as const) {
             const bit = button === 1 ? 1 : button === 2 ? 4 : 2;      // DOM buttons: 1 left, 2 right, 4 middle
