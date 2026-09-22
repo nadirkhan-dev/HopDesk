@@ -23,7 +23,10 @@ import { AccountClient } from './account.js';
 import { HostRole } from './host.js';
 import { ViewerRole } from './viewer.js';
 import { openInputController, linuxBackend, type InputController } from '@hopdesk/platform';
-import { createPermissionManager, openPermissionSettings, type PermissionReport } from './permissions.js';
+import {
+  clearStaleMacPermissions, createPermissionManager, openPermissionSettings, resetMacPermissions,
+  type PermissionReport,
+} from './permissions.js';
 import { TrustedDevices } from './trusted.js';
 import { BackgroundMode, openAtLogin, setOpenAtLogin } from './background.js';
 import { viewerNotices } from './permission-report.js';
@@ -622,7 +625,14 @@ app.whenReady().then(async () => {
      remote access is switched on — and checked again whenever HopDesk comes
      back to the front, which is what happens after a trip to System Settings. */
   if (process.platform === 'darwin') {
-    await refreshPermissions(false);
+    const report = await refreshPermissions(false);
+    /* A permission that reads as missing may be one an earlier build was given:
+       macOS ties it to a signature, and an ad hoc signed build gets a new one
+       each release. Clearing it is what makes macOS ask again. */
+    if (await clearStaleMacPermissions(dataDir, app.getVersion(), report.items.some(i => !i.granted))) {
+      log.info('cleared permissions granted to an earlier build, so macOS asks again for this one');
+      await refreshPermissions(false);
+    }
     permissionsChanged();
     app.on('browser-window-focus', () => { void refreshPermissions(false).then(permissionsChanged); });
   }
@@ -1154,6 +1164,19 @@ handle('askPermission', async (id: string) => {
   return { ...result, report: permissionReport };
 });
 handle('requestPermissions', () => refreshPermissions(true));
+/* For a switch that is on in System Settings but does nothing: clears the stale
+   entry and restarts, so macOS asks again for the build that is running. */
+handle('resetPermissions', async () => {
+  const result = await resetMacPermissions();
+  if (!result.ok) {
+    log.warn(`could not reset macOS permissions: ${result.detail}`);
+    return result;
+  }
+  log.info(`reset macOS permissions for ${result.bundleId}; restarting so macOS asks again`);
+  app.relaunch();
+  app.quit();
+  return result;
+});
 handle('openPermissionSettings', (action: string) => {
   openPermissionSettings(action as PermissionReport['action']);
   return { ok: true };

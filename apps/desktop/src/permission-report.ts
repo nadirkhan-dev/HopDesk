@@ -49,7 +49,8 @@ export function macReport(capture: PermissionState, input: PermissionState): Per
       granted: capture === 'granted',
       why: 'Without it, someone connecting sees a blank screen or only the desktop background.',
       how: `Open ${SETTINGS} → Screen Recording (called "Screen & System Audio Recording" on newer macOS), `
-        + 'switch HopDesk on, then quit and reopen HopDesk — macOS applies this one only after a restart.',
+        + 'switch HopDesk on, then quit and reopen HopDesk — macOS applies this one only after a restart. '
+        + 'If it is already on and still not allowed, select HopDesk, remove it with the − button, and add it again.',
       action: 'open-screen-recording',
     },
     {
@@ -59,7 +60,9 @@ export function macReport(capture: PermissionState, input: PermissionState): Per
       granted: input === 'granted',
       why: 'Without it, someone connecting can watch but their mouse and keyboard do nothing.',
       how: `Open ${SETTINGS} → Accessibility and switch HopDesk on. `
-        + 'If HopDesk is not in the list, add it with the + button from your Applications folder.',
+        + 'If HopDesk is not in the list, add it with the + button from your Applications folder. '
+        + 'If it is already on and still not allowed, select HopDesk, remove it with the − button, add it again, '
+        + 'and reopen HopDesk.',
       action: 'open-accessibility',
     },
   ];

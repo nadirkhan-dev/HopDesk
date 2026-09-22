@@ -691,9 +691,16 @@
     <div class="actions">
       <button class="btn primary setup-ask">Allow Accessibility</button>
       <button class="btn setup-settings" hidden>Open Settings</button>
+      <button class="btn primary setup-restart" hidden>Reopen HopDesk</button>
     </div>
   </div>
   <p class="hint" id="setup-done-text" hidden>Both are allowed. This computer is ready to be connected to.</p>
+  <div id="setup-stuck" hidden>
+    <p class="hint">Switched on in System Settings but still "Not allowed yet"? That switch belongs to
+      an older copy of HopDesk. Start over and HopDesk will reopen and ask again.</p>
+    <p class="hint" id="setup-stuck-error" hidden></p>
+    <button class="btn" id="setup-reset">Start over</button>
+  </div>
   <menu>
     <button class="btn" id="setup-later">Do this later</button>
     <button class="btn primary" id="setup-done" hidden>Done</button>

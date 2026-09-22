@@ -113,7 +113,13 @@ export function initHopdesk({ api, toast, confirmDialog }) {
         open.className = 'btn small';
         open.textContent = `Open ${item.name} settings`;
         open.onclick = () => api.openPermissionSettings(item.action);
-        row.append(why, how, open);
+        /* A switch turned on in Settings may not reach this running copy until
+           it restarts, so the way to do that is always beside it. */
+        const restart = document.createElement('button');
+        restart.className = 'btn small';
+        restart.textContent = 'Reopen HopDesk';
+        restart.onclick = () => api.relaunch();
+        row.append(why, how, open, restart);
       } else if (item.id === 'screen-recording' && screenRecordingMissingAtSomePoint.value) {
         /* Switched on while HopDesk was running: macOS applies it only after a restart. */
         const note = document.createElement('p');
@@ -303,15 +309,23 @@ export function initHopdesk({ api, toast, confirmDialog }) {
         settings.hidden = true;
         /* Screen Recording only takes effect after a restart, so if it was
            missing when this opened, offer one. */
-        if (restart) restart.hidden = !setup.screenWasMissing;
+        if (restart) restart.hidden = !(item.id === 'screen-recording' && setup.screenWasMissing);
       } else {
         allGranted = false;
         how.textContent = promptGone ? item.how : '';
         ask.hidden = promptGone;
         settings.hidden = !promptGone;
-        if (restart) restart.hidden = true;
+        /* A switch turned on in Settings may not reach this running copy:
+           Screen Recording never does before a restart, and Accessibility
+           sometimes does not either. So once Settings has been opened, offer
+           the restart even though the permission still reads as missing. */
+        if (restart) restart.hidden = step.dataset.settingsOpened !== 'yes';
       }
     }
+    /* Once Settings has been opened for something still missing, it may be a
+       stale switch from an older build, which only starting over fixes. */
+    $('#setup-stuck').hidden = allGranted || !items.some(i => !i.granted
+      && setupStepFor(i.id)?.dataset.settingsOpened === 'yes');
     $('#setup-done').hidden = !allGranted;
     $('#setup-done-text').hidden = !allGranted;
     $('#setup-later').textContent = allGranted ? 'Close' : 'Do this later';
@@ -323,7 +337,10 @@ export function initHopdesk({ api, toast, confirmDialog }) {
     if (!items.length) return;                       // nothing to ask for on this platform
     setup.open = true;
     setup.screenWasMissing = !items.find(i => i.id === 'screen-recording')?.granted;
-    for (const id of ['screen-recording', 'accessibility']) delete setupStepFor(id).dataset.promptGone;
+    for (const id of ['screen-recording', 'accessibility']) {
+      delete setupStepFor(id).dataset.promptGone;
+      delete setupStepFor(id).dataset.settingsOpened;
+    }
     renderSetup(items);
     const dialog = $('#dlg-setup');
     if (!dialog.open) dialog.showModal();
@@ -347,16 +364,29 @@ export function initHopdesk({ api, toast, confirmDialog }) {
     const step = setupStepFor(id);
     step.querySelector('.setup-ask').onclick = async () => {
       const result = await api.askPermission(id);
-      // macOS asks once. If it showed nothing, the rest is done in Settings.
-      if (!result.granted && !result.prompted) step.dataset.promptGone = 'yes';
+      /* macOS asks once per app, and whether it showed anything cannot be
+         told from here: the call returns before the person answers either
+         way. So after one ask the rest is done in Settings; its dialog, if it
+         appeared, stays on screen beside this one. */
+      if (!result.granted) step.dataset.promptGone = 'yes';
       renderSetup(result.report?.items ?? []);
     };
-    step.querySelector('.setup-settings').onclick = () => {
-      api.openPermissionSettings(id === 'screen-recording' ? 'open-screen-recording' : 'open-accessibility');
+    step.querySelector('.setup-settings').onclick = async () => {
+      step.dataset.settingsOpened = 'yes';
+      await api.openPermissionSettings(id === 'screen-recording' ? 'open-screen-recording' : 'open-accessibility');
+      renderSetup((await api.checkPermissions())?.items ?? []);
     };
     const restart = step.querySelector('.setup-restart');
     if (restart) restart.onclick = () => api.relaunch();
   }
+  $('#setup-reset').onclick = async () => {
+    const result = await api.resetPermissions();
+    // On success HopDesk restarts; only a failure comes back here.
+    const error = $('#setup-stuck-error');
+    error.hidden = result?.ok !== false;
+    error.textContent = 'Could not start over. In System Settings, select HopDesk in both lists, '
+      + 'remove it with the − button, then reopen HopDesk.';
+  };
   $('#setup-later').onclick = () => closeSetup();
   $('#setup-done').onclick = () => closeSetup();
   $('#dlg-setup').addEventListener('cancel', e => { e.preventDefault(); closeSetup(); });

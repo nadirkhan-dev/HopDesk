@@ -180,8 +180,12 @@ jobs:
              switch HopDesk on, and come back. Screen Recording needs HopDesk to
              restart — the **Reopen HopDesk** button does it.
 
-          Each new version is a new unsigned app to macOS: expect to repeat
-          step 3, and possibly to switch the two permissions off and on again.
+          Each new version is a new unsigned app to macOS, so expect to repeat
+          step 3. macOS also ties each permission to the version that was given
+          it, which is why a switch left on from an older HopDesk does nothing
+          for a new one. HopDesk clears those on its first run, so macOS asks
+          again. If a switch is on and HopDesk still says "Not allowed",
+          **Start over** in its setup screen clears them by hand.
 
           **Debian, Ubuntu, Mint, Pop!_OS** — download the `.deb` and:
 
