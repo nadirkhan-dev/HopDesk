@@ -285,3 +285,41 @@ test('the window cannot be navigated away or open new windows', { skip, timeout:
     await app.close();
   }
 });
+
+/**
+ * Which screen is shared, on a computer with more than one.
+ *
+ * Written on a laptop with an external monitor, where sharing showed the
+ * laptop screen and every window on the other monitor was simply missing. A
+ * machine with one screen - a CI runner, usually - has nothing to choose, and
+ * the check for that is half the point: the choice must not appear there.
+ */
+test('the screen being shared is listed, chosen and remembered', { skip, timeout: 90_000 }, async () => {
+  const dataDir = mkdtempSync(path.join(tmpdir(), 'hopdesk-screens-'));
+  let app = await launchApp({ env: ENV, dataDir });
+  try {
+    const status = await app.eval(`return await window.hopdesk.hostStatus()`);
+    assert.ok(status.screens.length >= 1, 'a computer always has at least one screen');
+    assert.ok(status.screens.some(s => s.id === status.sharedScreen), 'shares a screen that exists');
+    assert.ok(status.screens.some(s => s.primary), 'one of them is the main screen');
+    assert.match(status.screens[0].label, /^Screen 1 — \d+ × \d+/);
+
+    const hidden = await app.eval(`return document.querySelector('#mine-screen-field').hidden`);
+    assert.equal(hidden, status.screens.length < 2,
+      'the choice appears only where there is something to choose between');
+
+    const other = status.screens.find(s => s.id !== status.sharedScreen);
+    if (!other) return;                       // one screen: nothing more to prove here
+
+    await app.eval(`return await window.hopdesk.setRemoteAccess({ screen: ${other.id} })`);
+    assert.equal((await app.eval(`return await window.hopdesk.hostStatus()`)).sharedScreen, other.id);
+
+    // The choice outlives the app, or every restart goes back to the wrong monitor.
+    await app.close();
+    app = await launchApp({ env: ENV, dataDir });
+    assert.equal((await app.eval(`return await window.hopdesk.hostStatus()`)).sharedScreen, other.id);
+    assert.equal(await app.eval(`return document.querySelector('#mine-screen').value`), String(other.id));
+  } finally {
+    await app.close();
+  }
+});

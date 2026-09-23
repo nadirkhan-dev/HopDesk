@@ -135,10 +135,24 @@ export class BackgroundMode {
     this.notifications.set(sessionId, notification);
   }
 
-  /** Whether closing the window should hide the app instead of quitting it. */
+  /**
+   * Whether closing the window should hide the app instead of quitting it.
+   *
+   * Only while this computer is actually reachable. Hiding exists so that
+   * closing the window does not cut off someone who is connected, or take this
+   * computer off the network without saying so - and the menu bar item is
+   * there to show it is still running. With remote access off there is nothing
+   * to stay running for, and an app that will not close when asked is its own
+   * kind of broken.
+   */
   shouldHideOnClose(): boolean {
-    return process.platform === 'darwin' && !this.quitting;
+    if (process.platform !== 'darwin' || this.quitting) return false;
+    const status = this.opts.status();
+    return status.enabled || status.sessions.length > 0;
   }
+
+  /** Quitting has begun (⌘Q, the menu, a signal): stop intercepting the close. */
+  beginQuit(): void { this.quitting = true; }
 
   stop(): void {
     for (const notification of this.notifications.values()) notification.close();

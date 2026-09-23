@@ -28,7 +28,56 @@ async function screenStream() {
     try { await track.applyConstraints({ frameRate: { ideal: 30, max: 60 } }); } catch { /* the default rate is fine */ }
   }
   bridge.hostLog(`screen acquired: ${capture.getVideoTracks().map(t => t.label).join(', ')}`);
+  void measure(capture);
   return capture;
+}
+
+/**
+ * The size of what was captured, told to the main process.
+ *
+ * A track's settings are not filled in until frames arrive, so this waits for
+ * one rather than reporting zeroes. It is only used to notice that the picture
+ * is of a different monitor than the one being shared.
+ */
+async function measure(stream) {
+  const track = stream.getVideoTracks()[0];
+  if (!track) return;
+  for (let attempt = 0; attempt < 10; attempt++) {
+    const { width, height } = track.getSettings();
+    if (width && height) { bridge.hostCaptured({ width, height }); return; }
+    await new Promise(resolve => setTimeout(resolve, 200));
+  }
+}
+
+/**
+ * The person sharing chose a different screen. The picture has to change for
+ * whoever is already watching, and reconnecting them to do it would be rude:
+ * the new track goes into the sender that is already sending, which WebRTC
+ * carries without renegotiating.
+ */
+async function switchScreen() {
+  const old = capture;
+  capture = null;
+  let fresh;
+  try {
+    fresh = await screenStream();
+  } catch (err) {
+    bridge.hostLog(`could not change screen: ${err?.message ?? err}`);
+    capture = old;                       // keep sending what is already working
+    return;
+  }
+  const track = fresh.getVideoTracks()[0] ?? null;
+  for (const session of sessions.values()) {
+    for (const sender of session.pc.getSenders()) {
+      if (sender.track?.kind !== 'video') continue;
+      try { await sender.replaceTrack(track); } catch (err) {
+        bridge.hostLog(`could not change screen for a session: ${err?.message ?? err}`);
+      }
+    }
+  }
+  // Only once nobody is sending it any more: stopping it first freezes the picture.
+  for (const t of old ? old.getTracks() : []) { try { t.stop(); } catch { /* already stopped */ } }
+  bridge.hostLog('screen changed');
 }
 
 const sessions = servePeerCalls({
@@ -56,5 +105,7 @@ bridge.onHostSend(({ sessionId, label, message }) => {
   const dropped = session.send(label, message, { queue: label === 'display' });
   if (dropped) bridge.hostLog(`session ${sessionId}: ${label} message not sent: ${dropped}`);
 });
+
+bridge.onHostRecapture(() => { void switchScreen(); });
 
 bridge.hostReady();

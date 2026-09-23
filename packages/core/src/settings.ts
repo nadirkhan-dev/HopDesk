@@ -24,6 +24,12 @@ export interface RemoteAccessSettings {
   port: number;
   /** Announce this computer on the local network so it can be found by name. */
   announce: boolean;
+  /**
+   * Which screen is shared, as Electron's display id, on a computer with more
+   * than one. Null shares the main screen — and is also what a screen that has
+   * since been unplugged falls back to.
+   */
+  screen: number | null;
 }
 
 /** The HopDesk server this computer is signed in to, if any. Not secret. */
@@ -53,6 +59,7 @@ export const DEFAULT_REMOTE_ACCESS: RemoteAccessSettings = {
   enabled: false,
   port: DEFAULT_HOST_PORT,
   announce: true,
+  screen: null,
 };
 
 const DEFAULT_KEYS = ['scaling', 'fullscreenOnConnect', 'viewOnly', 'shareClipboard', 'enableAudio', 'autoReconnect'] as const;
@@ -153,6 +160,8 @@ function sanitizeRemoteAccess(input: unknown): RemoteAccessSettings {
   if (Number.isInteger(raw.port) && (raw.port as number) >= 1024 && (raw.port as number) <= 65535) {
     out.port = raw.port as number;
   }
+  // Electron's display ids are large but whole; anything else means "the main screen".
+  if (Number.isFinite(raw.screen) && Number.isInteger(raw.screen)) out.screen = raw.screen as number;
   /* There was once an "unattended access" password here, stored as the SPAKE2
      scalar. That scalar *was* the credential: anyone who could read this file
      could connect. Trusted device keys replaced it (apps/desktop/src/trusted.ts),

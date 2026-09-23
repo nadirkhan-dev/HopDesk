@@ -209,6 +209,13 @@ jobs:
             sharing a Mac's screen and controlling it have **not** been tested
             by this build.
 
+          ## Sharing a computer with two screens
+
+          Only one screen is shared at a time - Chromium captures a monitor,
+          not the desktop as a whole - so windows on the other monitor are not
+          in the picture at all. **This computer → Screen to share** chooses
+          which, and anyone watching sees the change straight away.
+
           ## What is not
 
           - **Linux on Wayland cannot share its whole screen.** Log into an Xorg

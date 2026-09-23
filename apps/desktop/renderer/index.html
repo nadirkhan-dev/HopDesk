@@ -390,6 +390,12 @@
           <button class="btn ghost small" id="mine-copy-code">Copy</button>
           <button class="btn ghost small" id="mine-regen" title="Replace the access code">New code</button></div>
       </div>
+      <!-- Only on a computer with more than one screen: which one is shared. -->
+      <div class="field" id="mine-screen-field" hidden>
+        <label for="mine-screen">Screen to share</label>
+        <select id="mine-screen"></select>
+        <p class="hint">Only this screen is shared. Windows on the other screen are not in the picture.</p>
+      </div>
       <p class="hint" id="mine-protection"></p>
       <p class="warn-text" id="mine-detail" hidden></p>
       <button class="btn small" id="mine-fix" hidden>Open System Settings</button>

@@ -28,6 +28,9 @@ import {
   type PermissionReport,
 } from './permissions.js';
 import { TrustedDevices } from './trusted.js';
+import {
+  capturedTheWrongScreen, screenChoices, sharedDisplay, sourceForDisplay,
+} from './screens.js';
 import { BackgroundMode, openAtLogin, setOpenAtLogin } from './background.js';
 import { viewerNotices } from './permission-report.js';
 import {
@@ -146,7 +149,45 @@ function createWindow() {
     window?.hide();
   });
   window.on('closed', () => { window = null; });
-  Menu.setApplicationMenu(null);
+  Menu.setApplicationMenu(applicationMenu());
+}
+
+/**
+ * The menu bar.
+ *
+ * Linux and Windows have none: everything is in the window. macOS is not
+ * optional, though - an app with no application menu has no Quit item and no
+ * ⌘Q, which left force quit as the only way to stop HopDesk. ⌘C and ⌘V are
+ * here for the same reason: without an Edit menu macOS does not deliver them,
+ * and a Device ID that cannot be pasted is not much use.
+ */
+function applicationMenu(): Menu | null {
+  if (process.platform !== 'darwin') return null;
+  return Menu.buildFromTemplate([
+    {
+      label: app.name,
+      submenu: [
+        { role: 'about' },
+        { type: 'separator' },
+        { role: 'hide' }, { role: 'hideOthers' }, { role: 'unhide' },
+        { type: 'separator' },
+        /* Not `role: 'quit'`: quitting has to be announced first, so closing
+           the window stops hiding it and every session is ended properly. */
+        {
+          label: `Quit ${app.name}`, accelerator: 'Command+Q',
+          click: () => { background?.beginQuit(); app.quit(); },
+        },
+      ],
+    },
+    {
+      label: 'Edit',
+      submenu: [
+        { role: 'undo' }, { role: 'redo' }, { type: 'separator' },
+        { role: 'cut' }, { role: 'copy' }, { role: 'paste' }, { role: 'selectAll' },
+      ],
+    },
+    { label: 'Window', submenu: [{ role: 'minimize' }, { role: 'close' }, { role: 'togglefullscreen' }] },
+  ]);
 }
 
 /* ------------------------------------------------- this computer as a host */
@@ -183,6 +224,21 @@ async function ensureHostWindow(): Promise<BrowserWindow> {
   await win.loadFile(HOST_FILE);
   await ready;
   return win;
+}
+
+/**
+ * The screen being shared. On a computer with one, that is the only one there
+ * is; on a laptop with an external monitor it is whichever was chosen, because
+ * the windows on the other monitor are not in the picture at all.
+ */
+function displayShared() {
+  return sharedDisplay(screen.getAllDisplays(), screen.getPrimaryDisplay().id,
+    settings.get().remoteAccess.screen);
+}
+
+/** Tells the capture window to let go of this screen and take the other one. */
+function recapture() {
+  if (hostWindow && !hostWindow.isDestroyed()) hostWindow.webContents.send('host:recapture');
 }
 
 function closeHostWindowIfIdle() {
@@ -425,7 +481,7 @@ function createRoles(identity: LocalIdentity) {
      * in the same global space Electron reports bounds in.
      */
     displayBounds: () => {
-      const display = screen.getPrimaryDisplay();
+      const display = displayShared();
       const perPixel = process.platform === 'darwin' ? 1 : display.scaleFactor;
       return {
         x: Math.round(display.bounds.x * perPixel),
@@ -553,9 +609,11 @@ app.whenReady().then(async () => {
       try { callback(streams); } catch { /* a refusal: getDisplayMedia rejects in the capture window */ }
     };
     void desktopCapturer.getSources({ types: ['screen'], fetchWindowIcons: false }).then(sources => {
-      const display = screen.getPrimaryDisplay();
-      const chosen = sources.find(s => s.display_id === String(display.id)) ?? sources[0];
+      const display = displayShared();
+      const chosen = sourceForDisplay(sources, screen.getAllDisplays(), display);
       log.info(`screen sources: ${sources.map(s => `${s.name}/${s.display_id}`).join(', ') || 'none'}`);
+      log.info(`sharing ${chosen?.name ?? 'nothing'} (${display.size.width}x${display.size.height} at `
+        + `${display.bounds.x},${display.bounds.y})`);
       if (!chosen) log.error('no screen to share: the system reported no screens HopDesk can capture');
       answer(chosen ? { video: chosen } : {});
     }).catch(err => {
@@ -687,6 +745,9 @@ app.on('window-all-closed', () => {
 // Quitting is held back until the shutdown has finished, however it started
 // (menu, window close, or Electron's own handling of SIGTERM).
 app.on('before-quit', e => {
+  /* However quitting started, from here on the window closing must not be
+     turned into hiding, or the app would be left half shut down. */
+  background?.beginQuit();
   if (shutdownFinished) return;
   e.preventDefault();
   void shutdown().then(() => app.quit());
@@ -1135,6 +1196,11 @@ function hostStatusPayload() {
     permissions: permissionReport,
     inputAvailable: problem === null,
     ...(problem ? { inputDetail: problem } : {}),
+    /* Only what someone sharing needs to decide: which screens there are and
+       which one they are sharing. A computer with one screen gets a list of
+       one, and the window leaves the choice out. */
+    screens: screenChoices(screen.getAllDisplays(), screen.getPrimaryDisplay().id),
+    sharedScreen: displayShared().id,
   };
 }
 
@@ -1182,7 +1248,9 @@ handle('openPermissionSettings', (action: string) => {
   return { ok: true };
 });
 
-handle('setRemoteAccess', async (patch: { enabled?: boolean; announce?: boolean; port?: number }) => {
+handle('setRemoteAccess', async (patch: {
+  enabled?: boolean; announce?: boolean; port?: number; screen?: number | null;
+}) => {
   if (!host) throw new Error('This computer has no HopDesk identity yet');
   /* Switching sharing on is the moment to ask the operating system, so the
      answer arrives before someone tries to connect rather than after. On
@@ -1195,10 +1263,17 @@ handle('setRemoteAccess', async (patch: { enabled?: boolean; announce?: boolean;
 
   if (typeof patch?.announce === 'boolean') update.remoteAccess!.announce = patch.announce;
   if (Number.isInteger(patch?.port)) update.remoteAccess!.port = patch.port;
+  const screenChanged = patch?.screen !== undefined && patch.screen !== settings.get().remoteAccess.screen;
+  if (patch?.screen === null || Number.isInteger(patch?.screen)) update.remoteAccess!.screen = patch.screen ?? null;
 
   if (typeof patch?.enabled === 'boolean') update.remoteAccess!.enabled = patch.enabled;
 
   const next = await settings.update(update);
+  /* Someone watching should see the other screen now, not after reconnecting. */
+  if (screenChanged) {
+    log.info(`sharing screen ${next.remoteAccess.screen ?? 'main'} from now on`);
+    recapture();
+  }
   const wanted = next.remoteAccess.enabled;
   const listening = host.status().listening;
   if (wanted && !listening) await host.start();
@@ -1284,6 +1359,27 @@ ipcMain.on('host:display', (e, payload: { sessionId?: unknown; message?: unknown
 ipcMain.on('host:log', (e, text: unknown) => {
   if (!fromHostWindow(e) || typeof text !== 'string') return;
   log.info(`capture window: ${text.slice(0, 200)}`);
+});
+
+/**
+ * What was actually captured, measured in the capture window.
+ *
+ * Which source is which monitor can only be matched by position on X11, where
+ * the ids mean nothing (see screens.ts). If that matching is ever wrong the
+ * person sharing sees nothing unusual — a picture arrives, of the wrong
+ * monitor — so the sizes are compared and the disagreement written down.
+ */
+ipcMain.on('host:captured', (e, size: unknown) => {
+  if (!fromHostWindow(e) || typeof size !== 'object' || size === null) return;
+  const { width, height } = size as { width?: unknown; height?: unknown };
+  if (typeof width !== 'number' || typeof height !== 'number') return;
+  const display = displayShared();
+  log.info(`captured ${width}x${height}`);
+  if (capturedTheWrongScreen(display, { width, height })) {
+    log.warn(`the picture is ${width}x${height} but the screen being shared is `
+      + `${display.size.width}x${display.size.height}: this may be the wrong monitor. `
+      + 'Choose the other screen under "This computer".');
+  }
 });
 
 /* The viewer's side of a session: its channels and what became of its input.

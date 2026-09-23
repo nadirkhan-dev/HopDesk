@@ -119,6 +119,10 @@ contextBridge.exposeInMainWorld('hopdesk', {
   hostClipboard: (sessionId, message) => ipcRenderer.send('host:clipboard', { sessionId, message }),
   hostDisplay: (sessionId, message) => ipcRenderer.send('host:display', { sessionId, message }),
   hostLog: text => ipcRenderer.send('host:log', text),
+  hostCaptured: size => ipcRenderer.send('host:captured', size),
+  onHostRecapture: handler => {
+    ipcRenderer.on('host:recapture', () => handler());
+  },
   onHostSend: handler => {
     ipcRenderer.on('host:send', (_event, payload) => handler(payload));
   },

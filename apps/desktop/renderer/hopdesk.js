@@ -25,6 +25,10 @@ export function initHopdesk({ api, toast, confirmDialog }) {
     scale: 'fit',
     clipboardSeq: 0,
     lastClipboardSent: '',
+    /* Why turning remote access on last failed. A toast says it once and
+       vanishes; this one stays, because "it just says Off" is otherwise all
+       anyone can report. */
+    hostError: null,
   };
 
   /* ------------------------------------------------- this computer (host) */
@@ -46,9 +50,11 @@ export function initHopdesk({ api, toast, confirmDialog }) {
        otherwise looks like success: capture returns black frames and input does
        nothing at all. Say so, and offer the switch. */
     const permissionDetail = status.permissions?.detail;
-    const detail = permissionDetail ?? status.detail ?? (status.inputAvailable === false ? status.inputDetail : '');
+    const detail = ui.hostError
+      ?? permissionDetail ?? status.detail ?? (status.inputAvailable === false ? status.inputDetail : '');
     $('#mine-detail').textContent = detail ?? '';
     $('#mine-detail').hidden = !detail;
+    renderScreens(status.screens ?? [], status.sharedScreen);
     renderTrusted(status.trusted ?? []);
     renderWatching(status.sessions ?? []);
     const items = status.permissions?.items ?? [];
@@ -79,6 +85,33 @@ export function initHopdesk({ api, toast, confirmDialog }) {
       sessions.append(row);
     }
   };
+
+  /**
+   * Which screen is shared, on a computer with more than one.
+   *
+   * Chromium captures one monitor, not the desktop as a whole, so on a laptop
+   * with an external monitor the windows on the other one are not dimmed or
+   * cropped - they are absent. Whoever is sharing chooses, and the choice
+   * reaches anyone already watching without reconnecting them.
+   */
+  function renderScreens(screens, shared) {
+    const field = $('#mine-screen-field');
+    field.hidden = screens.length < 2;
+    if (field.hidden) return;
+    const select = $('#mine-screen');
+    const wanted = screens.map(s => `${s.id}:${s.label}`).join('|');
+    if (select.dataset.screens !== wanted) {
+      select.dataset.screens = wanted;
+      select.replaceChildren();
+      for (const item of screens) {
+        const option = document.createElement('option');
+        option.value = String(item.id);
+        option.textContent = item.label;
+        select.append(option);
+      }
+    }
+    if (document.activeElement !== select) select.value = String(shared ?? '');
+  }
 
   /**
    * Each permission macOS asks for, allowed or not: what it is for, where to
@@ -397,15 +430,30 @@ export function initHopdesk({ api, toast, confirmDialog }) {
     const status = ui.status ?? await api.hostStatus();
     try {
       if (!status.enabled) {
-        renderHost(await api.setRemoteAccess({ enabled: true }));
+        const next = await api.setRemoteAccess({ enabled: true });
+        ui.hostError = null;
+        renderHost(next);
         toast('This computer can now be connected to with its Device ID and access code.');
       } else {
         if (status.sessions.length
           && !(await confirmDialog('Turn off remote access?',
             'Someone is connected to this computer. Turning remote access off will disconnect them.', 'Turn off'))) return;
+        ui.hostError = null;
         renderHost(await api.setRemoteAccess({ enabled: false }));
         toast('Remote access is off. No one can connect to this computer.');
       }
+    } catch (err) {
+      ui.hostError = `Could not turn remote access on: ${friendlyError(err.message)}`;
+      toast(friendlyError(err.message));
+      renderHost(ui.status);
+    }
+  };
+
+  $('#mine-screen').onchange = async event => {
+    const screen = Number(event.target.value);
+    try {
+      renderHost(await api.setRemoteAccess({ screen: Number.isFinite(screen) ? screen : null }));
+      toast('Sharing that screen now.');
     } catch (err) {
       toast(friendlyError(err.message));
     }
