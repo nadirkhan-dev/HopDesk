@@ -132,11 +132,20 @@ export class MacInput implements InputController {
     if (this.closed) throw new Error('This input controller is closed');
   }
 
-  /** Posts an event and releases it: CGEvent objects are reference counted. */
+  /**
+   * Posts an event and releases it: CGEvent objects are reference counted.
+   *
+   * The flags are always set, even to nothing. They used to be left alone
+   * whenever the viewer held no modifier, and an event with no flags of its
+   * own picks up the Mac's *current* state - so anyone sitting at the Mac
+   * holding Shift shifted the letters a viewer was typing, and a Mac with
+   * Caps Lock on capitalised them. A viewer's keystrokes carry the viewer's
+   * modifiers and nothing else.
+   */
   private post(event: unknown, withFlags = true) {
     if (!event) return;
     try {
-      if (withFlags && this.flags) this.q.CGEventSetFlags(event, this.flags);
+      if (withFlags) this.q.CGEventSetFlags(event, this.flags);
       this.q.CGEventPost(HID_EVENT_TAP, event);
     } finally {
       this.q.CFRelease(event);
