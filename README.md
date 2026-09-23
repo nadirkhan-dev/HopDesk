@@ -268,7 +268,7 @@ Diagnostics*).
 | **Full screen** | The *Fullscreen* button or **F11**. **Ctrl+Alt+Enter** leaves — a way out that no remote application wants, because in full screen even Cmd and Alt+Tab go to the other computer. The toolbar hides itself; touch the top edge to bring it back. |
 | **Screen size** | *Fit* shows the whole screen, letterboxed rather than cropped. *Fill* fills the window and crops. *1:1* is one remote pixel per pixel here, drawn sharp, which is what to use for a Retina Mac. |
 | **The pointer** | The other computer's pointer is drawn over the picture, because macOS does not include its cursor in what it shares. Every part of that screen is reachable, including the very edges, so a Mac's Dock, its menu bar and its hot corners work. |
-| **Keys** | The Super (Windows) key is Cmd on a Mac. In full screen, HopDesk holds the keyboard so shortcuts reach the other computer instead of this desktop. |
+| **Keys** | Every key is sent as a real key press, including letters, so games and shortcuts on the other computer see them. The Super (Windows) key is Cmd on a Mac. In full screen, HopDesk holds the keyboard so shortcuts reach the other computer instead of this desktop. |
 | **Clipboard** | Text copied on either side is available on the other. |
 
 ## Security

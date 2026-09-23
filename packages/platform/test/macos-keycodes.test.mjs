@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { planFor, characterFor, modifierFlagFor, usLayoutKeyCode, MAC_FLAGS, MAC_VIRTUAL_KEYS } from '../dist/index.js';
+import { planFor, characterFor, modifierFlagFor, usLayoutKeyCode, HeldModifiers, MAC_FLAGS, MAC_VIRTUAL_KEYS } from '../dist/index.js';
 
 /**
  * How a viewer's keys become macOS events. Pure decisions, so they can be
@@ -26,16 +26,43 @@ test('modifiers carry the flag macOS reports them with', () => {
   assert.equal(modifierFlagFor(0x61), null);
 });
 
-test('printable characters are sent as text, not as key positions', () => {
-  /* A key code means a position on the keyboard, so sending the code for "A"
-     types Q on a French layout. Text does not have that problem. */
-  assert.deepEqual(planFor(0x61), { kind: 'text', text: 'a' });
-  assert.deepEqual(planFor(0x41), { kind: 'text', text: 'A' });
-  assert.deepEqual(planFor(0x40), { kind: 'text', text: '@' });
+test('printable keys carry a position as well as their character', () => {
+  /* Both, and for a reason each. A game reads the key code, so a character
+     with none never reaches it - which is why the letters of a fighting game's
+     controls did nothing on a Mac while the arrow keys worked. The character
+     is attached too, so a Mac on another layout still types what was pressed
+     rather than whatever sits at that position. */
+  assert.deepEqual(planFor(0x61), { kind: 'key', keyCode: 0x00, text: 'a' });
+  assert.deepEqual(planFor(0x41), { kind: 'key', keyCode: 0x00, text: 'A' });   // same position, shifted
+  assert.deepEqual(planFor(0x7a), { kind: 'key', keyCode: 0x06, text: 'z' });
+  assert.deepEqual(planFor(0x78), { kind: 'key', keyCode: 0x07, text: 'x' });
+  assert.deepEqual(planFor(0x6f), { kind: 'key', keyCode: 0x1f, text: 'o' });
+  assert.deepEqual(planFor(0x6c), { kind: 'key', keyCode: 0x25, text: 'l' });
+  assert.deepEqual(planFor(0x3b), { kind: 'key', keyCode: 0x29, text: ';' });
+  assert.deepEqual(planFor(0x31), { kind: 'key', keyCode: 0x12, text: '1' });
+});
+
+test('characters with nowhere to press them from are still sent as text', () => {
+  assert.deepEqual(planFor(0x40), { kind: 'text', text: '@' });           // shifted, no bare position
   assert.deepEqual(planFor(0xe9), { kind: 'text', text: 'é' });
   assert.deepEqual(planFor(0x01000634), { kind: 'text', text: 'ش' });     // Arabic sheen
   assert.deepEqual(planFor(0x0100597d), { kind: 'text', text: '好' });     // CJK
   assert.deepEqual(planFor(0x0101f600), { kind: 'text', text: '😀' });    // outside the BMP
+});
+
+test('every key a two-player fighting game uses has a position', () => {
+  /* The controls that failed: two people on one keyboard, one on the left
+     hand side with the arrows, the other on letters. Every one of these has
+     to arrive as a real key or that player cannot move. */
+  const controls = 'aszxolkerdftgqwup';
+  for (const character of controls) {
+    const plan = planFor(character.codePointAt(0));
+    assert.equal(plan.kind, 'key', `${character} must be a real key, not text`);
+  }
+  // And the keys that already worked, which must keep working.
+  for (const keysym of [0xff51, 0xff52, 0xff53, 0xff54, 0xffe1, 0xffe2]) {
+    assert.equal(planFor(keysym).kind, 'virtual');
+  }
 });
 
 test('nonsense and control codes are ignored rather than guessed at', () => {
@@ -75,4 +102,40 @@ test('the table covers the keys a viewer can actually send', () => {
   // No two keysyms share a key code by accident, apart from the ones that should.
   const codes = Object.values(MAC_VIRTUAL_KEYS);
   assert.equal(new Set(codes).size, codes.length, 'two keysyms map to the same macOS key');
+});
+
+/**
+ * Two people on one keyboard, which is what a fighting game is.
+ *
+ * Both Shift keys are one flag to macOS, so a flag has to stay down while
+ * either key holds it. Releasing one used to clear it for both, which took
+ * Shift away from the player still holding theirs mid-round.
+ */
+test('a modifier held by two keys survives one of them being released', () => {
+  const held = new HeldModifiers();
+  const SHIFT_L = 0xffe1, SHIFT_R = 0xffe2;
+
+  assert.equal(held.set(MAC_FLAGS.shift, SHIFT_L, true), MAC_FLAGS.shift);
+  assert.equal(held.set(MAC_FLAGS.shift, SHIFT_R, true), MAC_FLAGS.shift);
+  // Player one lets go; player two is still holding theirs.
+  assert.equal(held.set(MAC_FLAGS.shift, SHIFT_L, false), MAC_FLAGS.shift,
+    'Shift must stay down for the player still holding it');
+  assert.equal(held.set(MAC_FLAGS.shift, SHIFT_R, false), 0, 'and lift once nobody is');
+});
+
+test('modifiers held at the same time are all reported', () => {
+  const held = new HeldModifiers();
+  held.set(MAC_FLAGS.shift, 0xffe1, true);
+  held.set(MAC_FLAGS.control, 0xffe3, true);
+  assert.equal(held.flags, MAC_FLAGS.shift | MAC_FLAGS.control);
+  held.set(MAC_FLAGS.control, 0xffe3, false);
+  assert.equal(held.flags, MAC_FLAGS.shift);
+  // A session ending drops everything, so nothing is left stuck down.
+  held.clear();
+  assert.equal(held.flags, 0);
+});
+
+test('releasing a key that was never held changes nothing', () => {
+  const held = new HeldModifiers();
+  assert.equal(held.set(MAC_FLAGS.command, 0xffeb, false), 0);
 });

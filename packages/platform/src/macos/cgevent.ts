@@ -1,6 +1,6 @@
 import koffi from 'koffi';
 import type { InputController, PointerButton } from '../interfaces.js';
-import { MAC_FLAGS, planFor } from './keycodes.js';
+import { HeldModifiers, MAC_FLAGS, planFor, usLayoutKeyCode } from './keycodes.js';
 
 /**
  * Input injection on macOS, through Quartz events (CGEvent) — the same
@@ -109,6 +109,8 @@ export class MacInput implements InputController {
   private readonly q: Bindings;
   private readonly heldButtons = new Set<PointerButton>();
   private readonly heldKeys = new Map<number, number>();     // keysym → key code
+  /** Which keys hold each modifier: see HeldModifiers, and two players on one keyboard. */
+  private readonly modifiers = new HeldModifiers();
   private flags = 0;
   private readonly maxWheelClicks: number;
   private closed = false;
@@ -194,35 +196,44 @@ export class MacInput implements InputController {
     if (plan.kind === 'virtual') {
       /* A modifier changes the flags carried by everything that follows, which
          is how macOS reports Command-C rather than a bare C. */
-      if (plan.modifier !== null) {
-        this.flags = down ? this.flags | plan.modifier : this.flags & ~plan.modifier;
-      }
+      if (plan.modifier !== null) this.flags = this.modifiers.set(plan.modifier, keysym, down);
       const event = this.q.CGEventCreateKeyboardEvent(null, plan.keyCode, down);
       if (down) this.heldKeys.set(keysym, plan.keyCode); else this.heldKeys.delete(keysym);
       this.post(event);
       return;
     }
 
-    /* Printable text. The key code is 0 and the character is attached, so the
-       Mac's own keyboard layout does not reinterpret it. Command and Control
-       combinations still need a real key code, so those fall back to the
-       character's position on a US layout. */
-    if (this.flags & (MAC_FLAGS.command | MAC_FLAGS.control)) {
-      const code = usLayoutKeyCode(plan.text);
-      if (code !== null) {
-        const event = this.q.CGEventCreateKeyboardEvent(null, code, down);
-        if (down) this.heldKeys.set(keysym, code); else this.heldKeys.delete(keysym);
-        this.post(event);
-        return;
-      }
+    /* A printable key with a position on the keyboard: sent as a real key
+       press, because that is the only kind games and shortcuts can see, with
+       the character attached so that a Mac using another layout still types
+       what was pressed rather than whatever sits at that position.
+
+       Not with Command or Control held: those are matched on the key code, and
+       a character attached to the event can change what macOS matches. */
+    if (plan.kind === 'key') {
+      const event = this.q.CGEventCreateKeyboardEvent(null, plan.keyCode, down);
+      if (!event) return;
+      if (!(this.flags & (MAC_FLAGS.command | MAC_FLAGS.control))) this.setText(event, plan.text);
+      if (down) this.heldKeys.set(keysym, plan.keyCode); else this.heldKeys.delete(keysym);
+      this.post(event);
+      return;
     }
+
+    /* A character with nowhere to press it from - accented, CJK, emoji. The key
+       code is 0 and only the character carries meaning, which text fields
+       accept and games cannot see. There is nothing better available. */
     const event = this.q.CGEventCreateKeyboardEvent(null, 0, down);
     if (!event) return;
-    const utf16 = new Uint16Array(plan.text.length);
-    for (let i = 0; i < plan.text.length; i++) utf16[i] = plan.text.charCodeAt(i);
-    this.q.CGEventKeyboardSetUnicodeString(event, utf16.length, utf16);
+    this.setText(event, plan.text);
     if (down) this.heldKeys.set(keysym, 0); else this.heldKeys.delete(keysym);
     this.post(event);
+  }
+
+  /** Attaches the character an event should produce, whatever the Mac's layout. */
+  private setText(event: unknown, text: string) {
+    const utf16 = new Uint16Array(text.length);
+    for (let i = 0; i < text.length; i++) utf16[i] = text.charCodeAt(i);
+    this.q.CGEventKeyboardSetUnicodeString(event, utf16.length, utf16);
   }
 
   releaseAll() {
@@ -232,6 +243,7 @@ export class MacInput implements InputController {
       this.post(this.q.CGEventCreateKeyboardEvent(null, keyCode, false), false);
     }
     for (const button of [...this.heldButtons]) this.button(button, false);
+    this.modifiers.clear();
     this.flags = 0;
   }
 
@@ -258,19 +270,6 @@ export class MacInput implements InputController {
 }
 
 /**
- * Key codes for a US layout, used only for Command and Control shortcuts, where
- * macOS matches on the key code rather than the character.
- */
-const US_LAYOUT: Record<string, number> = {
-  a: 0x00, s: 0x01, d: 0x02, f: 0x03, h: 0x04, g: 0x05, z: 0x06, x: 0x07, c: 0x08, v: 0x09,
-  b: 0x0b, q: 0x0c, w: 0x0d, e: 0x0e, r: 0x0f, y: 0x10, t: 0x11,
-  '1': 0x12, '2': 0x13, '3': 0x14, '4': 0x15, '6': 0x16, '5': 0x17, '=': 0x18, '9': 0x19,
-  '7': 0x1a, '-': 0x1b, '8': 0x1c, '0': 0x1d, ']': 0x1e, o: 0x1f, u: 0x20, '[': 0x21,
-  i: 0x22, p: 0x23, l: 0x25, j: 0x26, "'": 0x27, k: 0x28, ';': 0x29, '\\': 0x2a,
-  ',': 0x2b, '/': 0x2c, n: 0x2d, m: 0x2e, '.': 0x2f, '`': 0x32,
-};
-
-/**
  * Asks macOS for Screen Recording, which Electron cannot do (its
  * `askForMediaAccess` covers only the microphone and camera).
  *
@@ -291,7 +290,5 @@ export function screenRecordingAllowed(): boolean {
   return loadQuartz().CGPreflightScreenCaptureAccess();
 }
 
-export function usLayoutKeyCode(text: string): number | null {
-  const code = US_LAYOUT[text.toLowerCase()];
-  return code === undefined ? null : code;
-}
+// Where the table lives now; still exported from here, where it was.
+export { usLayoutKeyCode };
