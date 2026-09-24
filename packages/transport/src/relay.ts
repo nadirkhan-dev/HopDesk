@@ -119,7 +119,10 @@ export class RelayClient {
       this.pendingConnects.clear();
 
       /* 4001 and 4003 mean this device's credentials are no longer good —
-         reconnecting would only repeat the refusal. */
+         reconnecting would only repeat the refusal. 4005 is different: the
+         computer is waiting to be approved from another one on the account,
+         and when that happens nothing tells it - so it keeps trying, and the
+         reason it was given is what the window shows meanwhile. */
       const permanent = event.code === 4001 || event.code === 4003;
       this.setState('offline', permanent ? (event.reason || 'this computer is no longer enrolled') : event.reason);
       if (permanent) {

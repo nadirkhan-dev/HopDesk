@@ -91,9 +91,32 @@ test('two computers sign in to a HopDesk server and connect through it, with no 
     await host.waitFor(`return document.querySelector('#mc-relay')?.textContent === 'Connected'`, 20_000, 'the host connected to the server');
     const hostName = await host.eval(`return (await window.hopdesk.accountState()).deviceName`);
 
-    /* The viewer: signed in to the same account. */
+    /* The viewer: signed in to the same account - and then approved from the
+       host, because signing in adds a computer to an account and does not make
+       it one of yours. Until the host says yes, the viewer cannot reach the
+       server's relay at all, which is the whole point of the arrangement. */
     await signIn(viewer, server.url);
-    await viewer.waitFor(`return document.querySelector('#mc-relay')?.textContent === 'Connected'`, 20_000, 'the viewer connected to the server');
+    const viewerName = await viewer.eval(`return (await window.hopdesk.accountState()).deviceName`);
+    await host.waitFor(`
+      document.querySelector('#mc-refresh').click();
+      return [...document.querySelectorAll('.computer-row')]
+        .some(r => r.querySelector('.sub').textContent.includes('Waiting to be approved'))`,
+      30_000, 'the new computer to appear as waiting on the host');
+
+    /* Approved by pressing Approve and confirming, as a person would: the
+       dialog shows the fingerprint of the computer being let in. */
+    await host.eval(`
+      const row = [...document.querySelectorAll('.computer-row')]
+        .find(r => r.querySelector('.sub').textContent.includes('Waiting to be approved'));
+      row.querySelector('.connect-go').click();
+      return true`);
+    await host.waitFor(`return document.querySelector('#dlg-confirm')?.open === true`, 15_000, 'the approve dialog');
+    const question = await host.eval(`return document.querySelector('#confirm-text').textContent`);
+    assert.match(question, /fingerprint is [0-9a-f]{4} /, question);
+    await host.eval(`document.querySelector('#confirm-ok').click(); return true`);
+
+    await viewer.waitFor(`return document.querySelector('#mc-relay')?.textContent === 'Connected'`, 40_000, 'the viewer connected to the server');
+    void viewerName;
 
     /* The host appears in the computers list, online, with a way in. */
     await viewer.eval(`document.querySelector('#mc-refresh').click(); return true`);

@@ -71,6 +71,9 @@ export function initHopdesk({ api, toast, confirmDialog }) {
     setupButton.hidden = !items.some(i => !i.granted);
     setupButton.onclick = () => { void openSetup(); };
     renderPermissions(items);
+    const print = $('#mine-fingerprint');
+    print.hidden = !status.keyFingerprint;
+    print.textContent = status.keyFingerprint ? `Key fingerprint: ${status.keyFingerprint}` : '';
     $('#mine-protection').textContent = status.deviceId ? `Identity key: ${status.keyProtection}` : '';
 
     const sessions = $('#mine-sessions');
@@ -325,19 +328,59 @@ export function initHopdesk({ api, toast, confirmDialog }) {
        is it. A computer not on the account has nothing authoritative to say
        about being reachable, so it says when it was last connected to
        instead - which is what someone would go on anyway. */
-    sub.textContent = [
-      row.status === 'online' ? 'Online'
-        : row.lastSeen ? lastSeenText(row.lastSeen)
-          : 'Not connected yet',
-      row.deviceId,
-    ].join(' · ');
+    sub.textContent = row.waiting
+      ? `Waiting to be approved · ${row.deviceId}`
+      : [
+        row.status === 'online' ? 'Online'
+          : row.lastSeen ? lastSeenText(row.lastSeen)
+            : 'Not connected yet',
+        row.deviceId,
+      ].join(' · ');
     who.append(name, sub);
 
     const dot = document.createElement('span');
     dot.className = `dot ${row.status === 'online' ? 'on' : 'off'}`;
 
-    el.append(dot, who, connectControl(row), removeButton(row));
+    el.append(dot, who, row.waiting ? approveControl(row) : connectControl(row), removeButton(row));
     return el;
+  }
+
+  /**
+   * A computer waiting to be let onto the account.
+   *
+   * Email and password are enough to add a computer; they are not enough to
+   * make it one of yours. So a new one waits here until somebody at a computer
+   * that is already approved says yes - and is shown its fingerprint first,
+   * because that is the only thing that distinguishes the machine you just
+   * set up from one somebody else added.
+   */
+  function approveControl(row) {
+    const wrap = document.createElement('div');
+    wrap.className = 'connect-control';
+    const approve = document.createElement('button');
+    approve.className = 'btn small primary connect-go';
+    approve.textContent = 'Approve';
+    approve.title = 'Let this computer onto your account';
+    approve.onclick = async () => {
+      const print = row.publicKey ? keyFingerprint(row.publicKey) : 'unknown';
+      if (!(await confirmDialog('Approve this computer?',
+        `${row.name} will be able to connect to the computers on your account.\n\n`
+        + `Its fingerprint is ${print}. Approve it only if that is a computer you set up yourself — `
+        + 'check the fingerprint on it, under "This computer".', 'Approve'))) return;
+      approve.disabled = true;
+      approve.textContent = 'Approving…';
+      try {
+        accountState = await api.accountApproveComputer(row.deviceId);
+        await renderComputers();
+        toast(`${row.name} can now connect.`);
+      } catch (err) {
+        toast(friendlyError(err.message));
+        approve.disabled = false;
+        approve.textContent = 'Approve';
+      }
+    };
+    wrap.append(approve);
+    return wrap;
   }
 
   /**
@@ -1126,6 +1169,25 @@ export function keyChangeWarning({ hostName, deviceId, viaServer } = {}) {
   return `Accept only if you know why it changed - if ${who} was reinstalled, or HopDesk was `
     + 'set up on it again. Otherwise this may be a different computer answering in its place'
     + (viaServer ? ', which is what a compromised server would look like.' : '.');
+}
+
+/**
+ * The first eight bytes of a public key, in the same shape the rest of HopDesk
+ * shows them.
+ *
+ * It has to be the same shape, because the whole point is that two computers
+ * show it and a person compares the two by eye. Kept in step with
+ * `fingerprint` in apps/desktop/src/trusted.ts.
+ */
+export function keyFingerprint(publicKeyBase64) {
+  try {
+    const raw = atob(publicKeyBase64);
+    let hex = '';
+    for (let i = 0; i < Math.min(8, raw.length); i++) hex += raw.charCodeAt(i).toString(16).padStart(2, '0');
+    return hex.replace(/(.{4})(?=.)/g, '$1 ');
+  } catch {
+    return 'unreadable';
+  }
 }
 
 /**

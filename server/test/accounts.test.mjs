@@ -1,7 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { generateIdentity, deviceIdFromPublicKey, toBase64 } from '@hopdesk/crypto';
-import { testServer } from './helpers/server.mjs';
+import { testServer, client } from './helpers/server.mjs';
 import { enrolDevice, enrolSignature, signIn } from './helpers/device.mjs';
 
 test('an account is created, signed into, and its password is never stored in the clear', async () => {
@@ -293,3 +293,156 @@ test('a device token can sign that computer out, but cannot touch the account\'s
     assert.deepEqual((await server.call('GET', '/api/devices', { token: account.accessToken })).body.devices.map(d => d.name), ['Other']);
   } finally { await server.close(); }
 });
+
+/**
+ * A computer added to an account has to be vouched for by one already on it.
+ *
+ * This is the hole the architecture doc admitted to: email and password were
+ * enough to add a computer that could then reach every other computer on the
+ * account - so anyone who learned the password, or a server that decided to
+ * add a machine of its own, was one enrolment away from being let in. Adding
+ * is still easy. Being trusted is not.
+ */
+test('the first computer vouches for itself; the next one waits', async () => {
+  const server = await testServer();
+  try {
+    const session = await signIn(server);
+    // Nobody to ask, so the first computer approves itself - otherwise a new
+    // account could never approve anything and would be useless.
+    const first = await enrolDevice(server, session, 'Studio Mac');
+    assert.equal(first.response.body.device.approved, true);
+
+    const second = await enrolDevice(server, session, 'Office Linux', { approve: false });
+    assert.equal(second.response.body.device.approved, false, 'a second computer let itself in');
+
+    /* Both are listed - the waiting one has to be visible, with its key, or
+       nobody could decide about it - and the list says which is which. */
+    const listed = await server.call('GET', '/api/devices', { token: session.accessToken });
+    const rows = listed.body.devices.map(d => [d.name, d.approved]);
+    assert.deepEqual(rows.sort(), [['Office Linux', false], ['Studio Mac', true]]);
+    // With the key, so a person can be shown a fingerprint before deciding.
+    assert.ok(listed.body.devices.every(d => typeof d.publicKey === 'string' && d.publicKey.length > 0));
+  } finally { await server.close(); }
+});
+
+test('a computer waiting for approval cannot use the relay at all', async () => {
+  const server = await testServer();
+  try {
+    const session = await signIn(server);
+    const approved = await enrolDevice(server, session, 'Studio Mac');
+    const waiting = await enrolDevice(server, session, 'Office Linux', { approve: false });
+
+    /* Refused at the door rather than at the introduction: it cannot reach
+       another computer, cannot be reached, and cannot see who is online. */
+    const c = client(server.ws);
+    await c.open;
+    c.send({ type: 'auth', token: waiting.deviceToken });
+    const closed = await c.closed;
+    /* 4005, not 4003: a computer waiting for approval will be let in when
+       somebody says so, and has to keep trying until then - where a computer
+       removed from the account must stop. */
+    assert.equal(closed.code, 4005, `expected the socket to be refused, got ${JSON.stringify(closed)}`);
+    assert.match(closed.reason, /waiting to be approved/i);
+
+    // The approved one is unaffected.
+    const ok = client(server.ws);
+    await ok.open;
+    ok.send({ type: 'auth', token: approved.deviceToken });
+    assert.ok(await ok.next(m => m.type === 'ready'));
+    ok.close();
+  } finally { await server.close(); }
+});
+
+test('only an approved computer can approve another, never a password alone', async () => {
+  const server = await testServer();
+  try {
+    const session = await signIn(server);
+    const approved = await enrolDevice(server, session, 'Studio Mac');
+    const waiting = await enrolDevice(server, session, 'Office Linux', { approve: false });
+
+    /* The whole point: signing in is not enough. If it were, the password
+       would still be the only thing standing between an attacker and a
+       computer of their own on this account. */
+    const bySignIn = await server.call('POST', `/api/devices/${waiting.deviceId}/approve`,
+      { token: session.accessToken });
+    assert.equal(bySignIn.status, 403);
+    assert.equal(bySignIn.body.error, 'needs-approved-device');
+
+    // Nor can a computer that is itself waiting approve anything.
+    const alsoWaiting = await enrolDevice(server, session, 'Third', { approve: false });
+    const byWaiting = await server.call('POST', `/api/devices/${alsoWaiting.deviceId}/approve`,
+      { token: waiting.deviceToken });
+    assert.equal(byWaiting.status, 403);
+
+    // An approved computer can, and then the relay lets the new one in.
+    const done = await server.call('POST', `/api/devices/${waiting.deviceId}/approve`,
+      { token: approved.deviceToken });
+    assert.equal(done.status, 200);
+    const c = client(server.ws);
+    await c.open;
+    c.send({ type: 'auth', token: waiting.deviceToken });
+    assert.ok(await c.next(m => m.type === 'ready'), 'an approved computer was still refused');
+    c.close();
+  } finally { await server.close(); }
+});
+
+test('approving is scoped to the account, and a computer cannot approve itself', async () => {
+  const server = await testServer();
+  try {
+    const mine = await signIn(server);
+    const theirs = await signIn(server, 'someone-else@example.com');
+    const myDevice = await enrolDevice(server, mine, 'Mine');
+    /* Their first computer vouches for itself, so the waiting one has to be
+       their second - which is also the only shape in which "cannot approve
+       itself" means anything. */
+    await enrolDevice(server, theirs, 'Their first');
+    const theirWaiting = await enrolDevice(server, theirs, 'Theirs', { approve: false });
+
+    // Another account's computer is not mine to approve, or even to see.
+    const across = await server.call('POST', `/api/devices/${theirWaiting.deviceId}/approve`,
+      { token: myDevice.deviceToken });
+    assert.equal(across.status, 404);
+
+    // And a waiting computer cannot vouch for itself with its own token.
+    const itself = await server.call('POST', `/api/devices/${theirWaiting.deviceId}/approve`,
+      { token: theirWaiting.deviceToken });
+    assert.equal(itself.status, 403, 'a computer approved itself');
+
+    // An approved computer of the same account still can, which is the point.
+    const theirFirstToken = (await server.call('GET', '/api/devices', { token: theirs.accessToken })).status;
+    assert.equal(theirFirstToken, 200);
+  } finally { await server.close(); }
+});
+
+test('re-enrolling keeps the answer the account already gave', async () => {
+  const server = await testServer();
+  try {
+    const session = await signIn(server);
+    const first = await enrolDevice(server, session, 'Studio Mac');
+    const waiting = await enrolDevice(server, session, 'Office Linux', { approve: false });
+
+    /* Reinstalling HopDesk, or rotating a device key, must not re-approve a
+       computer that was waiting - nor un-approve one that was let in. */
+    const again = await enrolAgain(server, session, waiting);
+    assert.equal(again.body.device.approved, false, 'enrolling again approved a waiting computer');
+
+    const firstAgain = await enrolAgain(server, session, first);
+    assert.equal(firstAgain.body.device.approved, true, 'enrolling again un-approved a known computer');
+  } finally { await server.close(); }
+});
+
+/** Enrols the same device id again, as a reinstall would. */
+async function enrolAgain(server, session, device) {
+  const { body: challenge } = await server.call('POST', '/api/devices/challenge', { token: session.accessToken });
+  const signature = enrolSignature(device.identity, challenge.nonce, session.account.id);
+  return server.call('POST', '/api/devices', {
+    token: session.accessToken,
+    body: {
+      deviceId: device.deviceId,
+      publicKey: toBase64(device.identity.publicKey),
+      name: device.name,
+      nonce: challenge.nonce,
+      signature,
+    },
+  });
+}

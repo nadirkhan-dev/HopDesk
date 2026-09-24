@@ -24,6 +24,12 @@ export interface AccountComputer {
   name: string;
   /** 'macos', 'linux', 'windows' - what the computer said when it enrolled. */
   os: string | null;
+  /**
+   * Whether a computer already on this account has vouched for this one.
+   * A computer that has not been cannot reach anything: email and password add
+   * a computer, they do not make it one of yours.
+   */
+  approved: boolean;
   publicKey: string;
   online: boolean;
   lastSeen: number | null;
@@ -109,6 +115,10 @@ export class AccountClient extends EventEmitter {
   authorises(viewerId: string, viewerKey: Uint8Array): boolean {
     const known = this.computers.find(c => c.deviceId === viewerId);
     if (!known || known.self) return false;
+    /* A computer nobody on this account has vouched for is not one of ours,
+       whatever the server says about it. The relay refuses it a socket too;
+       this is the half that does not depend on the server behaving. */
+    if (!known.approved) return false;
     // The key must be the one the account holds for that Device ID.
     return known.publicKey === toBase64(viewerKey);
   }
@@ -232,6 +242,21 @@ export class AccountClient extends EventEmitter {
     this.detail = undefined;
     this.emitChange();
     return this.computers;
+  }
+
+  /**
+   * Vouches for another computer on this account, which lets it connect.
+   *
+   * Only a computer that is itself approved may do this, and the server checks
+   * that rather than taking our word for it - a sign-in alone is refused,
+   * which is what makes the whole arrangement worth anything.
+   */
+  async approveComputer(deviceId: string): Promise<void> {
+    const settings = this.deps.readSettings();
+    if (!settings.serverUrl) throw new AccountError('signed-out', 'Not signed in');
+    await this.request(settings.serverUrl, 'POST', `/api/devices/${encodeURIComponent(deviceId)}/approve`, {});
+    this.deps.log.info(`approved ${deviceId}; it can now connect through this account`);
+    await this.refreshComputers();
   }
 
   /** Removes another computer from the account. */

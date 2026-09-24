@@ -1263,6 +1263,9 @@ function hostStatusPayload() {
   return {
     ...(host ? host.status() : hostUnavailable()),
     ...(waylandLimitation() ? { detail: waylandLimitation() } : {}),
+    /* This computer's own key, short enough to read out. It is what somebody
+       approving this computer from another one compares against. */
+    keyFingerprint: localIdentity ? fingerprint(localIdentity.identity.publicKey) : null,
     permissions: permissionReport,
     inputAvailable: problem === null,
     ...(problem ? { inputDetail: problem } : {}),
@@ -1544,6 +1547,14 @@ handle('accountRefresh', async () => {
   await account.refreshComputers();
   return account.state();
 });
+/* Vouching for another computer on this account, with its fingerprint shown
+   in the window before anyone presses anything. */
+handle('accountApproveComputer', async (deviceId: string) => {
+  if (!account) throw new Error('Not signed in');
+  await account.approveComputer(String(deviceId));
+  return account.state();
+});
+
 handle('accountRemoveComputer', async (deviceId: string) => {
   if (!account) throw new Error('Not signed in');
   await account.removeComputer(String(deviceId));

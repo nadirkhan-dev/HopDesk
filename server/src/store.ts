@@ -25,6 +25,13 @@ export interface Device {
    * label, never anything to decide on.
    */
   os: string | null;
+  /**
+   * Whether an already-approved computer on this account has vouched for this
+   * one. Email and password are enough to *add* a computer; they are not
+   * enough to make it one of yours. Until this is true the device can sign in
+   * and see that it is waiting, and nothing else.
+   */
+  approved: boolean;
   createdAt: number;
   lastSeen: number | null;
 }
@@ -74,7 +81,8 @@ export class Store {
         token_hash text not null,
         created_at integer not null,
         last_seen integer,
-        os text
+        os text,
+        approved integer not null default 0
       );
       create index if not exists devices_account on devices(account_id);
       create table if not exists throttle (
@@ -89,6 +97,10 @@ export class Store {
        be added separately. Checked rather than caught, because a failed ALTER
        and a column that is already there are the same error text. */
     this.addColumn('devices', 'os', 'text');
+    /* Devices that existed before approval did are approved: they were added
+       when adding was all it took, and locking their owner out of their own
+       computers would be a fine way to introduce a security feature. */
+    this.addColumn('devices', 'approved', 'integer not null default 1');
   }
 
   /** Adds a column if the table does not have it yet. */
@@ -170,14 +182,14 @@ export class Store {
 
   saveDevice(device: Omit<Device, 'lastSeen'> & { tokenHash: string }) {
     this.db.prepare(`
-      insert into devices (device_id, account_id, name, public_key, token_hash, created_at, os)
-      values (?, ?, ?, ?, ?, ?, ?)
+      insert into devices (device_id, account_id, name, public_key, token_hash, created_at, os, approved)
+      values (?, ?, ?, ?, ?, ?, ?, ?)
       on conflict(device_id) do update set
         account_id = excluded.account_id, name = excluded.name,
         public_key = excluded.public_key, token_hash = excluded.token_hash,
-        os = excluded.os
+        os = excluded.os, approved = excluded.approved
     `).run(device.deviceId, device.accountId, device.name, device.publicKey, device.tokenHash,
-      device.createdAt, device.os);
+      device.createdAt, device.os, device.approved ? 1 : 0);
   }
 
   deviceById(deviceId: string): (Device & { tokenHash: string }) | null {
@@ -195,6 +207,11 @@ export class Store {
     return rows.map(row => this.toDevice(row));
   }
 
+  /** One computer vouching for another. */
+  approveDevice(deviceId: string) {
+    this.db.prepare('update devices set approved = 1 where device_id = ?').run(deviceId);
+  }
+
   removeDevice(deviceId: string) {
     this.db.prepare('delete from devices where device_id = ?').run(deviceId);
   }
@@ -208,6 +225,7 @@ export class Store {
       deviceId: String(row.device_id), accountId: String(row.account_id), name: String(row.name),
       publicKey: String(row.public_key), tokenHash: String(row.token_hash),
       os: row.os === null || row.os === undefined ? null : String(row.os),
+      approved: Number(row.approved ?? 0) === 1,
       createdAt: Number(row.created_at),
       lastSeen: row.last_seen === null ? null : Number(row.last_seen),
     };

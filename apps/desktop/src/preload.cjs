@@ -105,6 +105,7 @@ contextBridge.exposeInMainWorld('hopdesk', {
   accountSignOut: () => ipcRenderer.invoke('accountSignOut'),
   accountRefresh: () => ipcRenderer.invoke('accountRefresh'),
   accountRemoveComputer: deviceId => ipcRenderer.invoke('accountRemoveComputer', deviceId),
+  accountApproveComputer: deviceId => ipcRenderer.invoke('accountApproveComputer', deviceId),
   connectComputer: deviceId => ipcRenderer.invoke('connectComputer', deviceId),
   onAccountState: handler => {
     ipcRenderer.on('accountState', (_event, payload) => handler(payload));

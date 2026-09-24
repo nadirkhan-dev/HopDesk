@@ -108,6 +108,21 @@ export class SignalingServer {
           ws.close(4001, 'unauthorised');
           return;
         }
+        /* A computer that has been added to the account but not yet vouched
+           for by one already on it gets no further than this. Refused here
+           rather than at the introduction, so it cannot reach another
+           computer, cannot be reached, and cannot see who is online. It can
+           still sign in over HTTP and be told it is waiting. */
+        const device = this.deps.store.deviceById(caller.deviceId);
+        if (!device?.approved) {
+          /* 4005 and not 4003: "removed from the account" is final, while
+             this is a computer that will be let in the moment somebody says
+             so, and it has to reconnect by itself when that happens rather
+             than waiting to be restarted. */
+          this.deps.log(`device ${caller.deviceId} is not approved yet; refusing the relay`);
+          ws.close(4005, 'this computer is waiting to be approved from one of your other computers');
+          return;
+        }
         clearTimeout(authTimer);
         connection = { deviceId: caller.deviceId, accountId: caller.accountId, send, close: (code, reason) => ws.close(code, reason) };
         this.deps.presence.add(connection);

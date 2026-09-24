@@ -95,6 +95,9 @@ export class Api {
       if (route === 'GET /api/devices') return this.listDevices(req, res);
       if (route === 'POST /api/devices/challenge') return this.deviceChallenge(req, res);
       if (route === 'POST /api/devices') return await this.enrolDevice(req, res);
+      if (req.method === 'POST' && /^\/api\/devices\/[^/]+\/approve$/.test(url.pathname)) {
+        return this.approveDevice(req, res, decodeURIComponent(url.pathname.split('/')[3]!));
+      }
       if (req.method === 'DELETE' && url.pathname.startsWith('/api/devices/')) {
         return this.removeDevice(req, res, decodeURIComponent(url.pathname.slice('/api/devices/'.length)));
       }
@@ -214,6 +217,9 @@ export class Api {
       os: d.os,
       // The public key is what the other side's signature is checked against.
       publicKey: d.publicKey,
+      /* Listed whether approved or not: a computer waiting to be let in is
+         exactly what the others need to be shown, with its fingerprint. */
+      approved: d.approved,
       online: this.deps.presence.isOnline(d.deviceId),
       lastSeen: d.lastSeen,
       self: d.deviceId === caller.deviceId,
@@ -231,6 +237,31 @@ export class Api {
     return this.send(res, 200, { nonce, expiresInMs: 5 * 60_000 });
   }
 
+  /**
+   * One computer vouching for another.
+   *
+   * Only an approved *device* may do it, never a bare sign-in: the whole point
+   * is that email and password are not enough to add a computer that can
+   * reach the others, so a password alone must not be enough to approve one
+   * either. That is what closes the hole where a server - or anyone who
+   * learned the password - quietly adds a machine of its own.
+   */
+  private approveDevice(req: IncomingMessage, res: ServerResponse, deviceId: string) {
+    const caller = this.authenticate(req.headers.authorization);
+    if (!caller) return this.send(res, 401, { error: 'unauthorised' });
+    if (!caller.deviceId) return this.send(res, 403, { error: 'needs-approved-device' });
+    const approver = this.deps.store.deviceById(caller.deviceId);
+    if (!approver?.approved) return this.send(res, 403, { error: 'needs-approved-device' });
+
+    const device = this.deps.store.deviceById(deviceId);
+    if (!device || device.accountId !== caller.accountId) return this.send(res, 404, { error: 'not-found' });
+    if (device.deviceId === caller.deviceId) return this.send(res, 400, { error: 'same-device' });
+
+    this.deps.store.approveDevice(deviceId);
+    this.deps.log(`device ${deviceId} approved by ${caller.deviceId}`);
+    return this.send(res, 200, { ok: true });
+  }
+
   private async enrolDevice(req: IncomingMessage, res: ServerResponse) {
     const caller = this.authenticate(req.headers.authorization);
     if (!caller) return this.send(res, 401, { error: 'unauthorised' });
@@ -243,6 +274,18 @@ export class Api {
     if (!challenge || challenge.expiresAt <= this.now() || challenge.accountId !== caller.accountId) {
       return this.send(res, 400, { error: 'bad-challenge' });
     }
+
+    /* Whether this computer is one of yours, or merely one somebody signed in
+       from. The first computer on an account has nobody to ask, so it vouches
+       for itself; every one after it waits for one that is already approved.
+       A computer re-enrolling keeps the answer it already had - reinstalling
+       HopDesk is not a new machine, and rotating its own key must not silently
+       re-approve it either. */
+    const already = this.deps.store.devicesOfAccount(caller.accountId);
+    const existingDevice = already.find(d => d.deviceId === body.deviceId);
+    const approved = existingDevice
+      ? existingDevice.approved
+      : !already.some(d => d.approved);
 
     let publicKey: Uint8Array;
     try {
@@ -279,11 +322,16 @@ export class Api {
       name: body.name,
       publicKey: body.publicKey,
       os: body.os ?? existing?.os ?? null,
+      approved,
       tokenHash: hashToken(deviceToken),
       createdAt: existing?.createdAt ?? this.now(),
     });
-    this.deps.log(`device ${body.deviceId} enrolled for account ${caller.accountId}`);
-    return this.send(res, 201, { deviceToken, device: { deviceId: body.deviceId, name: body.name } });
+    this.deps.log(`device ${body.deviceId} enrolled for account ${caller.accountId}`
+      + `${approved ? '' : ', waiting to be approved from an approved computer'}`);
+    return this.send(res, 201, {
+      deviceToken,
+      device: { deviceId: body.deviceId, name: body.name, approved },
+    });
   }
 
   private removeDevice(req: IncomingMessage, res: ServerResponse, deviceId: string) {

@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import {
   mergeComputers, methodsFor, defaultMethod, connectability, METHOD_LABELS,
 } from '../renderer/computers.js';
+import { keyFingerprint } from '../renderer/hopdesk.js';
 
 /**
  * One list out of two sources, and what each row offers.
@@ -104,4 +105,39 @@ test('an offline account computer cannot be reached, and says why', () => {
   /* Except by code: that goes over the network this computer is on, which the
      server knows nothing about. */
   assert.equal(connectability(row, 'code').ok, true);
+});
+
+/**
+ * A computer added to the account but not yet vouched for by one already on
+ * it. It is listed - it has to be, or nobody could decide about it - and it is
+ * not somewhere to connect to.
+ */
+test('a computer waiting for approval offers no way in, and says why', () => {
+  const [row] = mergeComputers({
+    account: [{ ...mac, approved: false }],
+    signedIn: true,
+  });
+  assert.equal(row.waiting, true);
+  assert.deepEqual(row.methods, [], 'a computer nobody has vouched for was offered as connectable');
+  const refused = connectability(row, 'ask');
+  assert.equal(refused.ok, false);
+  assert.match(refused.why, /waiting to be approved/i);
+  // Its key comes through, because a fingerprint is what the decision is made on.
+  assert.equal(row.publicKey, 'KEY-MAC');
+});
+
+test('an approved computer is not marked as waiting', () => {
+  const [row] = mergeComputers({ account: [{ ...mac, approved: true }], signedIn: true });
+  assert.equal(row.waiting, false);
+  assert.deepEqual(row.methods, ['ask', 'code']);
+});
+
+test('a fingerprint is short, grouped, and the same shape everywhere', () => {
+  /* Two computers show this and a person compares them by eye, so the shape
+     matters as much as the bytes: four hex characters at a time, first eight
+     bytes of the key, exactly as apps/desktop/src/trusted.ts prints it. */
+  const key = Buffer.from([0xde, 0xad, 0xbe, 0xef, 0x01, 0x23, 0x45, 0x67, 0x89, 0xab]).toString('base64');
+  assert.equal(keyFingerprint(key), 'dead beef 0123 4567');
+  // Nonsense in, something readable out - never a crash in front of a decision.
+  assert.equal(keyFingerprint('not base64 at all!!'), 'unreadable');
 });

@@ -55,6 +55,11 @@ export function mergeComputers({ account = [], known = [], signedIn = false } = 
       online: device.online === true,
       lastSeen: device.lastSeen ?? null,
       onAccount: true,
+      /* A computer on the account that nobody has vouched for yet. It is
+         listed - it has to be, or nobody could decide about it - but it is
+         not somewhere to connect to. */
+      waiting: device.approved === false,
+      publicKey: device.publicKey,
       paired: false,
       address: undefined,
       port: undefined,
@@ -97,6 +102,8 @@ export function mergeComputers({ account = [], known = [], signedIn = false } = 
 
 /** Every way this computer can be reached, best first. */
 export function methodsFor(row) {
+  // Nothing to offer until somebody vouches for it.
+  if (row.waiting) return [];
   const methods = [];
   if (row.paired) methods.push('trusted');
   if (row.onAccount) methods.push('ask');
@@ -119,6 +126,9 @@ export function defaultMethod(row, remembered) {
  * it.
  */
 export function connectability(row, method) {
+  if (row.waiting) {
+    return { ok: false, why: `${row.name} is waiting to be approved from a computer already on your account.` };
+  }
   if (row.onAccount && !row.online && method !== 'code') {
     return { ok: false, why: `${row.name} is not online, so the server cannot reach it.` };
   }
