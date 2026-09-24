@@ -122,6 +122,16 @@ jobs:
           security set-key-partition-list -S apple-tool:,apple:,codesign: \
             -s -k "$KEYCHAIN_PASSWORD" "$KEYCHAIN" >/dev/null
           security list-keychain -d user -s "$KEYCHAIN" login.keychain-db
+
+          # codesign will not sign with an identity it cannot build a chain
+          # for, and a certificate of our own has no chain to build - it is its
+          # own root. So the runner is told to trust it, for code signing only.
+          # It is trusted on this runner, for these few minutes, and nowhere
+          # else: what a Mac installing the app makes of it is a separate
+          # question, answered by Gatekeeper, which still asks.
+          security find-certificate -c "$SIGN_IDENTITY" -p "$KEYCHAIN" > "$RUNNER_TEMP/signer.pem"
+          sudo security add-trusted-cert -d -r trustRoot -p codeSign \
+            -k /Library/Keychains/System.keychain "$RUNNER_TEMP/signer.pem"
           security find-identity -v -p codesigning "$KEYCHAIN" | grep -F "$SIGN_IDENTITY"
 
       - name: Build the .dmg
