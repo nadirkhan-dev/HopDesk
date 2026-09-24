@@ -389,3 +389,30 @@ test('one list of computers, with the ways in and the choice remembered', { skip
     await app.close();
   }
 });
+
+/**
+ * The key-changed dialog's markup, in the real window.
+ *
+ * What the dialog *decides* is tested against a real handshake in
+ * test/key-change.test.mjs; this only holds the other end of that wiring in
+ * place, because the renderer finds these elements by name and a rename would
+ * otherwise fail silently - at the worst possible moment, with a person
+ * waiting to be shown two fingerprints.
+ */
+test('the key-changed dialog is present, closed, and offers Refuse before Accept', { skip, timeout: 60_000 }, async () => {
+  const app = await launchApp({ env: ENV });
+  try {
+    assert.equal(await app.eval(`return !!document.querySelector('#dlg-keychange')`), true);
+    assert.equal(await app.eval(`return document.querySelector('#dlg-keychange').open`), false,
+      'the dialog was open with nothing to decide');
+    for (const id of ['keychange-who', 'keychange-old', 'keychange-new', 'keychange-why']) {
+      assert.equal(await app.eval(`return !!document.querySelector('#${id}')`), true, `#${id} is missing`);
+    }
+    // Refusing is the safe answer, so it is the one focus lands on.
+    assert.equal(await app.eval(`return document.querySelector('#keychange-refuse').hasAttribute('autofocus')`), true);
+    assert.equal(await app.eval(`return document.querySelector('#keychange-accept').className`).then(c => c.includes('danger')), true,
+      'accepting a changed key is not marked as the weightier choice');
+  } finally {
+    await app.close();
+  }
+});
