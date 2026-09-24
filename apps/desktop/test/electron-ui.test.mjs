@@ -325,55 +325,66 @@ test('the screen being shared is listed, chosen and remembered', { skip, timeout
 });
 
 /**
- * Connecting again to a computer this one already knows.
+ * The computers list, in the real app: one row per machine, what it offers,
+ * and the choice being remembered.
  *
- * Typing a Device ID that HopDesk has on file is work it can do itself, so
- * every computer connected to before is listed: the ones that agreed to
- * remember this one connect in a click, and the rest fill the form in and ask
- * only for the code. Which of the two it is has to be visible, or a click that
- * quietly does nothing looks broken.
+ * The merging rules are tested on their own (test/computers.test.mjs); this is
+ * about the row a person actually sees and presses.
  */
-test('computers connected to before are listed, and reconnect without retyping', { skip, timeout: 90_000 }, async () => {
+test('one list of computers, with the ways in and the choice remembered', { skip, timeout: 90_000 }, async () => {
   const { generateIdentity, deviceIdFromPublicKey, toBase64 } =
     await import('../../../packages/crypto/dist/index.js');
-  const dataDir = mkdtempSync(path.join(tmpdir(), 'hopdesk-saved-'));
+  const dataDir = mkdtempSync(path.join(tmpdir(), 'hopdesk-list-'));
   mkdirSync(path.join(dataDir, 'hopdesk'), { recursive: true });
   const device = (name, paired, ago) => {
     const identity = generateIdentity();
     return {
       deviceId: deviceIdFromPublicKey(identity.publicKey),
       key: toBase64(identity.publicKey),
-      name,
-      lastConnected: Date.now() - ago,
-      lastAddress: '192.168.1.42',
-      lastPort: 47631,
+      name, lastConnected: Date.now() - ago, lastAddress: '192.168.1.42', lastPort: 47631,
       ...(paired ? { paired: true } : {}),
     };
   };
-  const [remembers, asksForCode] = [device('Studio Mac', true, 60_000), device('Office Linux', false, 5_000)];
+  const trusted = device('Studio Mac', true, 60_000);
+  const asksForCode = device('Office Linux', false, 5_000);
   writeFileSync(path.join(dataDir, 'hopdesk', 'devices.json'),
-    JSON.stringify({ devices: [remembers, asksForCode] }));
+    JSON.stringify({ devices: [trusted, asksForCode] }));
 
-  const app = await launchApp({ env: ENV, dataDir });
+  let app = await launchApp({ env: ENV, dataDir });
   try {
-    await app.waitFor(`return document.querySelectorAll('.saved-row').length === 2`, 10_000, 'both computers listed');
-    const rows = await app.eval(`return [...document.querySelectorAll('.saved-row')]
-      .map(r => r.querySelector('.who').textContent)`);
-    // Most recently used first, and each says whether a code is coming.
-    assert.match(rows[0], /Office Linux/);
-    assert.match(rows[0], /asks for its access code/);
-    assert.match(rows[1], /Studio Mac/);
-    assert.match(rows[1], /no code needed/);
-    assert.equal(await app.eval(`return !document.querySelector('#saved-hint').hidden`), true,
-      'says how to make it one click, while anything still asks for a code');
+    await app.waitFor(`return document.querySelectorAll('.computer-row').length === 2`, 10_000, 'both computers');
+    const rows = await app.eval(`return [...document.querySelectorAll('.computer-row')].map(r => ({
+      name: r.querySelector('b').textContent,
+      button: r.querySelector('.connect-go').textContent,
+      options: [...r.querySelectorAll('.connect-option')].map(o => o.dataset.method),
+      hasMore: !r.querySelector('.connect-more').hidden,
+    }))`);
 
-    /* The one that needs a code fills the form instead of failing a
-       connection: the ID and the address it answered on last time, with the
-       cursor in the code box. */
-    await click(app, '.saved-row .btn.primary');
-    assert.equal(await app.eval(`return document.querySelector('#cd-id').value`), asksForCode.deviceId);
-    assert.equal(await app.eval(`return document.querySelector('#cd-address').value`), '192.168.1.42');
+    // A trusted computer offers to connect outright; the other can only ask for a code.
+    const mac = rows.find(r => r.name === 'Studio Mac');
+    const linux = rows.find(r => r.name === 'Office Linux');
+    assert.equal(mac.button, 'Connect');
+    assert.deepEqual(mac.options, ['trusted', 'code']);
+    assert.equal(mac.hasMore, true);
+    assert.equal(linux.button, 'Use access code');
+    assert.deepEqual(linux.options, ['code'], 'offered a way in that would be refused');
+    assert.equal(linux.hasMore, false, 'a single way in needs no menu');
+
+    /* Choosing the code for the trusted computer, then pressing it: the form is
+       filled in and the cursor is in the code box. */
+    await click(app, `.computer-row[data-device-id="${trusted.deviceId}"] .connect-more`);
+    await click(app, `.computer-row[data-device-id="${trusted.deviceId}"] .connect-option[data-method="code"]`);
+    await click(app, `.computer-row[data-device-id="${trusted.deviceId}"] .connect-go`);
+    assert.equal(await app.eval(`return document.querySelector('#cd-id').value`), trusted.deviceId);
     assert.equal(await app.eval(`return document.activeElement.id`), 'cd-code');
+
+    // And that choice is still the one offered after a restart.
+    await app.close();
+    app = await launchApp({ env: ENV, dataDir });
+    await app.waitFor(`return document.querySelectorAll('.computer-row').length === 2`, 10_000, 'the list again');
+    assert.equal(
+      await app.eval(`return document.querySelector('.computer-row[data-device-id="${trusted.deviceId}"] .connect-go').textContent`),
+      'Use access code', 'the remembered choice was forgotten');
   } finally {
     await app.close();
   }

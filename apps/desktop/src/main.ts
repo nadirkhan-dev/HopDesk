@@ -1566,6 +1566,16 @@ handle('connectSaved', async (deviceId: string) => {
 });
 handle('forgetDevice', (deviceId: string) => { knownDevices.forget(String(deviceId)); return { ok: true }; });
 
+/* Which way in each computer was last reached by, so the button offers the
+   same one next time. Only ever a Device ID and one of three words. */
+handle('connectChoices', () => settings.get().connectChoices);
+handle('rememberConnectMethod', async (deviceId: string, method: string) => {
+  const which = method === 'trusted' || method === 'ask' || method === 'code' ? method : null;
+  if (!which) return { ok: false };
+  await settings.update({ connectChoices: { [String(deviceId)]: which } });
+  return { ok: true };
+});
+
 /* Anything unhandled reaches the log rather than vanishing or killing the app
    with a dialog the user cannot act on. */
 process.on('uncaughtException', err => {

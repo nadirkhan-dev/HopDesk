@@ -1,3 +1,4 @@
+import { OS_ICON, osIcon } from './os-icons.js';
 /**
  * Renderer.
  *
@@ -32,14 +33,8 @@ const DEFAULT_PROTOCOL_FOR_OS = { windows: 'rdp', macos: 'vnc', linux: 'rdp', ot
 const ZOOM_STEPS = [25, 33, 50, 67, 75, 90, 100, 110, 125, 150, 175, 200, 300];
 
 /* Simple, brand-free glyphs: a four-pane window, a laptop, a terminal, a monitor. */
-const OS_ICON = {
-  windows: '<svg viewBox="0 0 24 24" fill="currentColor"><rect x="3" y="3" width="8" height="8" rx="1"/><rect x="13" y="3" width="8" height="8" rx="1"/><rect x="3" y="13" width="8" height="8" rx="1"/><rect x="13" y="13" width="8" height="8" rx="1"/></svg>',
-  macos: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linejoin="round"><rect x="4" y="5" width="16" height="11" rx="1.5"/><path d="M2 19h20"/></svg>',
-  linux: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="4" width="18" height="16" rx="2"/><path d="m7 10 3 2.5L7 15M12 15h5"/></svg>',
-  other: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linejoin="round"><rect x="3" y="4" width="18" height="12" rx="1.5"/><path d="M9 20h6M12 16v4"/></svg>',
-};
 const osOf = c => c.os ?? (c.protocol === 'rdp' ? 'windows' : 'other');
-const osBadge = os => `<span class="os ${esc(os)}" aria-hidden="true">${OS_ICON[os] ?? OS_ICON.other}</span>`;
+const osBadge = os => osIcon(os);
 
 /* ------------------------------------------------------------- the list */
 

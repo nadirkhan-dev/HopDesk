@@ -92,9 +92,31 @@
     grid-template-columns: repeat(auto-fit, minmax(300px, 1fr));
     max-width: 920px; margin: 0 auto;
   }
-  .home > #saved { max-width: 920px; margin: 16px auto 0; }
+  .home > #computers { max-width: 920px; margin: 16px auto 0; }
   .home .card { margin: 0; }
   body.hd-session .home, body.focus-session .home { display: none; }
+
+  /* ------------------------------------------------------- computers list */
+  .computer-row {
+    display: flex; align-items: center; gap: 10px;
+    padding: 10px 4px; border-bottom: 1px solid var(--border);
+  }
+  .computer-row:last-child { border-bottom: none; }
+  .computer-row .who { min-width: 0; flex: 1; }
+  .computer-row .who b { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .computer-row .sub { font-size: 12px; color: var(--text-dim); }
+  .computer-row[data-status="offline"] .os { opacity: .55; }
+  .connect-control { position: relative; display: flex; gap: 4px; align-items: center; }
+  .connect-more { padding: 4px 6px; }
+  /* The other ways in, over the row rather than pushing it about. */
+  .connect-menu {
+    position: absolute; right: 0; top: calc(100% + 4px); z-index: 20; min-width: 230px;
+    display: flex; flex-direction: column; gap: 2px; padding: 4px;
+    background: var(--surface-2); border: 1px solid var(--border);
+    border-radius: var(--radius); box-shadow: var(--shadow);
+  }
+  .connect-option { text-align: left; display: block; padding: 6px 8px; }
+  .connect-option .sub { display: block; font-size: 11px; color: var(--text-dim); }
 
   /* ---------------------------------------------------------------- sidebar */
   aside {
@@ -478,27 +500,27 @@
             </details>
           </section>
 
-          <section class="card" id="mycomputers" hidden>
-            <div class="card-head">MY COMPUTERS <span id="mc-relay" class="badge"></span></div>
-            <div id="mc-list"></div>
-            <p class="hint" id="mc-detail"></p>
-            <div class="row">
-              <button class="btn ghost small" id="mc-refresh">Refresh</button>
-              <button class="btn ghost small" id="mc-signout">Sign out</button>
-            </div>
-          </section>
     </div>
-        <!-- Computers that paired with this one: one click, no code. -->
-        <section class="card" id="saved" hidden>
-          <div class="card-head">RECENT COMPUTERS</div>
-          <div id="saved-list"></div>
-          <p class="hint" id="saved-hint" hidden>
-            To connect with one click next time, tick "Let this computer connect again without asking"
-            on the other computer when it asks whether to allow you in.
-          </p>
-        </section>
-  </section>
 
+    <!--
+      Every computer this one can reach, from both places HopDesk knows them:
+      the account's devices, and the ones connected to before. The same machine
+      is one row, joined on its key - see renderer/computers.js.
+    -->
+    <section class="card" id="computers" hidden>
+      <div class="card-head">COMPUTERS <span id="mc-relay" class="badge"></span></div>
+      <div id="computers-list"></div>
+      <p class="hint" id="computers-hint" hidden>
+        To connect in one click, tick "Let this computer connect again without asking"
+        on the other computer when it asks whether to allow you in.
+      </p>
+      <p class="hint" id="mc-detail"></p>
+      <div class="row" id="account-actions" hidden>
+        <button class="btn ghost small" id="mc-refresh">Refresh</button>
+        <button class="btn ghost small" id="mc-signout">Sign out</button>
+      </div>
+    </section>
+  </section>
 
   <!-- A live HopDesk session: the other computer's screen. -->
   <section class="hd-view" id="hd-view" hidden>

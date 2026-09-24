@@ -8,6 +8,10 @@
  */
 import { createPeerSession, servePeerCalls } from './peer.js';
 import { pointToRemote, nearestRemotePoint, pictureRect, MODES } from './geometry.js';
+import {
+  mergeComputers, defaultMethod, connectability, METHOD_LABELS, METHOD_HINTS,
+} from './computers.js';
+import { osIcon } from './os-icons.js';
 
 const $ = sel => document.querySelector(sel);
 
@@ -262,74 +266,194 @@ export function initHopdesk({ api, toast, confirmDialog }) {
   }
 
   /** Saved computers: the ones that paired with this one. One click connects. */
-  async function renderSaved() {
-    const devices = (await api.knownDevices?.()) ?? [];
-    /* Every computer this one has connected to before, not only the ones that
-       will let it back in without a code. Typing a Device ID again for a
-       computer HopDesk already knows is work it can do itself: the ID goes in
-       for you, and where the other computer agreed to remember this one, the
-       whole thing is one click. Most recent first, because that is almost
-       always the one wanted. */
-    const known = [...devices].sort((a, b) => (b.lastConnected ?? 0) - (a.lastConnected ?? 0));
-    const card = $('#saved');
-    const list = $('#saved-list');
-    card.hidden = !known.length;
+  /* --------------------------------------------------------- computers */
+
+  /**
+   * Every computer this one can reach, in one list.
+   *
+   * Two sources feed it - the account's devices and the ones connected to
+   * before - and merging them is in renderer/computers.js, away from the DOM,
+   * because "which of these two records is the same machine" is a rule worth
+   * testing rather than eyeballing.
+   */
+  let accountState = { signedIn: false, computers: [], relay: 'offline' };
+  /** The way in last used for each computer, from settings. */
+  let choices = {};
+
+  async function renderComputers() {
+    const known = (await api.knownDevices?.()) ?? [];
+    choices = (await api.connectChoices?.()) ?? choices;
+    const rows = mergeComputers({
+      account: accountState.computers ?? [],
+      known,
+      signedIn: accountState.signedIn === true,
+    });
+    const card = $('#computers');
+    card.hidden = !rows.length && !accountState.signedIn;
+    const list = $('#computers-list');
     list.replaceChildren();
-    for (const device of known) {
-      const row = document.createElement('div');
-      row.className = 'saved-row';
-      const who = document.createElement('div');
-      who.className = 'who';
-      const name = document.createElement('b');
-      name.textContent = device.name || device.deviceId;
-      const detail = document.createElement('span');
-      detail.textContent = `${device.deviceId} · ${device.paired ? 'no code needed' : 'asks for its access code'}`;
-      who.append(name, detail);
-      const connect = document.createElement('button');
-      connect.className = 'btn primary small';
-      connect.textContent = 'Connect';
-      connect.onclick = async () => {
-        /* Not paired: nothing here can skip the code - the other computer
-           decides that, by remembering this one when it allows the
-           connection. What this can do is fill in everything except the code
-           and put the cursor where it is needed. */
-        if (!device.paired) {
-          $('#cd-id').value = device.deviceId;
-          $('#cd-address').value = device.lastAddress ?? '';
-          $('#cd-code').value = '';
-          $('#cd-code').focus();
-          toast(`Enter the access code shown on ${device.name || device.deviceId}.`);
-          return;
-        }
-        connect.disabled = true;
-        connect.textContent = 'Connecting…';
-        try {
-          await api.connectSaved(device.deviceId);
-        } catch (err) {
-          toast(friendlyError(err.message));
-        } finally {
-          connect.disabled = false;
-          connect.textContent = 'Connect';
-        }
-      };
-      const forget = document.createElement('button');
-      forget.className = 'btn ghost small';
-      forget.textContent = 'Remove';
-      forget.onclick = async () => {
-        if (!(await confirmDialog('Remove this computer?',
-          `${device.name || device.deviceId} will disappear from this list. It can still be connected to with its Device ID and access code.`,
-          'Remove'))) return;
-        await api.forgetDevice(device.deviceId);
-        await renderSaved();
-      };
-      row.append(who, connect, forget);
-      list.append(row);
+
+    if (!rows.length) {
+      const empty = document.createElement('p');
+      empty.className = 'hint';
+      empty.textContent = accountState.signedIn
+        ? 'No other computers on this account yet. Sign in to HopDesk on another computer and it appears here.'
+        : 'No computers yet. Connect to one with its Device ID and access code, and it stays in this list.';
+      list.append(empty);
     }
-    /* Said once, under the list, rather than on every row: what to do so that
-       next time is one click. Only while something in the list still asks for
-       a code. */
-    $('#saved-hint').hidden = known.every(d => d.paired);
+
+    for (const row of rows) list.append(computerRow(row));
+    // Said once, under the list: how to turn a prompt into one click.
+    $('#computers-hint').hidden = !rows.some(r => !r.paired);
   }
+
+  /** One computer: what it is, whether it can be reached, and the ways in. */
+  function computerRow(row) {
+    const el = document.createElement('div');
+    el.className = 'computer-row';
+    el.dataset.deviceId = row.deviceId;
+    el.dataset.status = row.status;
+
+    el.insertAdjacentHTML('afterbegin', osIcon(row.os ?? 'other'));
+    const who = document.createElement('div');
+    who.className = 'who';
+    const name = document.createElement('b');
+    name.textContent = row.name;
+    const sub = document.createElement('span');
+    sub.className = 'sub';
+    /* Two facts, in the order they are wanted: can I reach it, and which one
+       is it. A computer not on the account has nothing authoritative to say
+       about being reachable, so it says when it was last connected to
+       instead - which is what someone would go on anyway. */
+    sub.textContent = [
+      row.status === 'online' ? 'Online'
+        : row.lastSeen ? lastSeenText(row.lastSeen)
+          : 'Not connected yet',
+      row.deviceId,
+    ].join(' · ');
+    who.append(name, sub);
+
+    const dot = document.createElement('span');
+    dot.className = `dot ${row.status === 'online' ? 'on' : 'off'}`;
+
+    el.append(dot, who, connectControl(row), removeButton(row));
+    return el;
+  }
+
+  /**
+   * The Connect button, and the other ways in behind it.
+   *
+   * The choice is remembered per computer, because someone who has to ask
+   * permission every time for one machine and never for another should not
+   * have to re-pick which of those it is.
+   */
+  function connectControl(row) {
+    const wrap = document.createElement('div');
+    wrap.className = 'connect-control';
+    let method = defaultMethod(row, rememberedMethod(row.deviceId));
+
+    const go = document.createElement('button');
+    go.className = 'btn small primary connect-go';
+    const more = document.createElement('button');
+    more.className = 'btn small connect-more';
+    more.textContent = '▾';
+    more.title = 'Other ways to connect';
+    more.hidden = row.methods.length < 2;
+    const menu = document.createElement('div');
+    menu.className = 'connect-menu';
+    menu.hidden = true;
+
+    const paint = () => {
+      const can = connectability(row, method);
+      go.textContent = METHOD_LABELS[method];
+      go.disabled = !can.ok;
+      go.title = can.ok ? METHOD_HINTS[method] : can.why;
+    };
+
+    go.onclick = async () => {
+      const can = connectability(row, method);
+      if (!can.ok) { toast(can.why); return; }
+      rememberMethod(row.deviceId, method);
+      go.disabled = true;
+      go.textContent = 'Connecting…';
+      try {
+        await connectBy(row, method);
+      } catch (err) {
+        toast(friendlyError(err.message));
+      } finally {
+        go.disabled = false;
+        paint();
+      }
+    };
+
+    more.onclick = () => { menu.hidden = !menu.hidden; };
+    for (const option of row.methods) {
+      const item = document.createElement('button');
+      item.className = 'btn small connect-option';
+      item.dataset.method = option;
+      item.innerHTML = '';
+      const label = document.createElement('b');
+      label.textContent = METHOD_LABELS[option];
+      const hint = document.createElement('span');
+      hint.className = 'sub';
+      hint.textContent = METHOD_HINTS[option];
+      item.append(label, hint);
+      item.onclick = () => {
+        method = option;
+        rememberMethod(row.deviceId, option);
+        menu.hidden = true;
+        paint();
+      };
+      menu.append(item);
+    }
+
+    paint();
+    wrap.append(go, more, menu);
+    return wrap;
+  }
+
+  /** Does what the chosen way in means. */
+  async function connectBy(row, method) {
+    if (method === 'trusted') return api.connectSaved(row.deviceId);
+    if (method === 'ask') return api.connectComputer(row.deviceId);
+    // The code is the one thing HopDesk cannot supply: fill in the rest.
+    $('#cd-id').value = row.deviceId;
+    $('#cd-address').value = row.address ?? '';
+    $('#cd-code').value = '';
+    $('#cd-code').focus();
+    toast(`Enter the access code shown on ${row.name}.`);
+    return undefined;
+  }
+
+  function removeButton(row) {
+    const remove = document.createElement('button');
+    remove.className = 'btn ghost small';
+    remove.textContent = 'Remove';
+    remove.onclick = async () => {
+      const fromAccount = row.onAccount;
+      const question = fromAccount
+        ? `${row.name} will no longer be reachable through this account until it signs in again.`
+        : `${row.name} will disappear from this list. It can still be connected to with its Device ID and access code.`;
+      if (!(await confirmDialog('Remove this computer?', question, 'Remove'))) return;
+      try {
+        if (fromAccount) accountState = await api.accountRemoveComputer(row.deviceId);
+        else await api.forgetDevice(row.deviceId);
+        await renderComputers();
+      } catch (err) { toast(friendlyError(err.message)); }
+    };
+    return remove;
+  }
+
+  /* Per computer, so one machine that always asks and another that never does
+     are each remembered as they are. In settings beside everything else about
+     this installation, not in the window's own storage, which belongs to
+     Chromium's profile and does not outlive it. */
+  const rememberedMethod = deviceId => choices[deviceId];
+  const rememberMethod = (deviceId, method) => {
+    if (choices[deviceId] === method) return;
+    choices[deviceId] = method;
+    void api.rememberConnectMethod?.(deviceId, method);
+  };
 
   /* ------------------------------------------------- first-launch setup */
 
@@ -559,75 +683,15 @@ export function initHopdesk({ api, toast, confirmDialog }) {
   /* --------------------------------------------- the account, and its computers */
 
   const renderAccount = state => {
-    const card = $('#mycomputers');
-    card.hidden = !state.signedIn;
+    accountState = state ?? accountState;
     $('#btn-signin').hidden = state.signedIn;
-    if (!state.signedIn) return;
-
+    $('#account-actions').hidden = !state.signedIn;
     const relay = $('#mc-relay');
+    relay.hidden = !state.signedIn;
     relay.textContent = state.relay === 'online' ? 'Connected' : state.relay === 'connecting' ? 'Connecting…' : 'Offline';
-    $('#mc-detail').textContent = state.detail ?? (state.email ? `Signed in as ${state.email}` : '');
-
-    const list = $('#mc-list');
-    list.innerHTML = '';
-    const others = state.computers.filter(c => !c.self);
-    if (!others.length) {
-      const empty = document.createElement('p');
-      empty.className = 'hint';
-      empty.textContent = 'No other computers yet. Sign in to this account on another computer and turn its remote access on.';
-      list.append(empty);
-    }
-    for (const computer of others) {
-      const row = document.createElement('div');
-      row.className = 'computer';
-      row.dataset.deviceId = computer.deviceId;
-      const dot = document.createElement('span');
-      dot.className = `dot ${computer.online ? 'on' : 'off'}`;
-      const who = document.createElement('span');
-      who.className = 'name';
-      const name = document.createElement('b');
-      name.textContent = computer.name;
-      name.title = computer.deviceId;
-      who.append(name);
-      /* Offline says nothing about whether the computer is switched off or was
-         last here in March, and those call for different actions. */
-      if (!computer.online) {
-        const seen = document.createElement('span');
-        seen.className = 'sub';
-        seen.textContent = lastSeenText(computer.lastSeen);
-        who.append(seen);
-      }
-      const connect = document.createElement('button');
-      connect.className = 'btn small primary';
-      connect.textContent = 'Connect';
-      connect.disabled = !computer.online;
-      connect.title = computer.online ? `Connect to ${computer.name}` : 'That computer is not online';
-      connect.onclick = async () => {
-        connect.disabled = true;
-        connect.textContent = 'Connecting…';
-        try {
-          await api.connectComputer(computer.deviceId);
-        } catch (err) {
-          showConnectError(err.message);
-        } finally {
-          connect.textContent = 'Connect';
-          connect.disabled = !computer.online;
-        }
-      };
-      const remove = document.createElement('button');
-      remove.className = 'btn ghost small';
-      remove.textContent = 'Remove';
-      remove.title = 'Remove this computer from the account';
-      remove.onclick = async () => {
-        if (!(await confirmDialog('Remove this computer?',
-          `${computer.name} will no longer be reachable through this account until it signs in again.`, 'Remove'))) return;
-        try {
-          renderAccount(await api.accountRemoveComputer(computer.deviceId));
-        } catch (err) { toast(friendlyError(err.message)); }
-      };
-      row.append(dot, who, connect, remove);
-      list.append(row);
-    }
+    $('#mc-detail').textContent = state.signedIn
+      ? (state.detail ?? (state.email ? `Signed in as ${state.email}` : '')) : '';
+    void renderComputers();
   };
 
   api.onAccountState?.(renderAccount);
@@ -691,7 +755,7 @@ export function initHopdesk({ api, toast, confirmDialog }) {
       $('#cd-id').value = '';
       /* The list is how this computer is reached next time, so it has to
          appear now rather than on the next launch. */
-      void renderSaved();
+      void renderComputers();
     } catch (err) {
       setConnectBusy(false);
       showConnectError(err.message);
@@ -720,7 +784,7 @@ export function initHopdesk({ api, toast, confirmDialog }) {
     ui.session = status;
     if (status.state === 'connected') {
       setConnectBusy(false);
-      void renderSaved();
+      void renderComputers();
       $('#cd-error').hidden = true;
       $('#cd-error-detail').hidden = true;
       showSession(status);
@@ -728,7 +792,7 @@ export function initHopdesk({ api, toast, confirmDialog }) {
       setConnectBusy(false);
       hideSession();
       // A connection may have just paired this computer with another.
-      void renderSaved();
+      void renderComputers();
       if (status.error) showConnectError(status.error.message);
     } else if (status.state === 'reconnecting') {
       $('#hd-status').textContent = 'Reconnecting…';
@@ -1035,7 +1099,7 @@ export function initHopdesk({ api, toast, confirmDialog }) {
   }
 
   void refreshHost();
-  void renderSaved();
+  void renderComputers();
   void renderLoginItem();
   /* First launch, or any launch where something is still missing: show the
      steps rather than leaving them to be found in a panel. */

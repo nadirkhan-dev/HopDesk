@@ -44,9 +44,21 @@ export interface AccountSettings {
   forceRelay?: boolean;
 }
 
+/** How each computer was last connected to, keyed by Device ID. */
+export type ConnectChoices = Record<string, 'trusted' | 'ask' | 'code'>;
+
 export interface AppSettings {
   version: 1;
   account: AccountSettings;
+  /**
+   * The way in last used for each computer.
+   *
+   * Kept here rather than in the window's own storage, which belongs to
+   * Chromium's profile and does not survive what a person would call the same
+   * installation. Someone who has to ask permission for one computer and never
+   * for another should not re-pick which is which.
+   */
+  connectChoices: ConnectChoices;
   defaults: Pick<ConnectionOptions,
     'scaling' | 'fullscreenOnConnect' | 'viewOnly' | 'shareClipboard' | 'enableAudio' | 'autoReconnect'>;
   remoteAccess: RemoteAccessSettings;
@@ -67,6 +79,7 @@ const DEFAULT_KEYS = ['scaling', 'fullscreenOnConnect', 'viewOnly', 'shareClipbo
 export const DEFAULT_SETTINGS: AppSettings = {
   version: 1,
   account: {},
+  connectChoices: {},
   remoteAccess: structuredClone(DEFAULT_REMOTE_ACCESS),
   defaults: {
     scaling: DEFAULT_OPTIONS.scaling,
@@ -94,6 +107,7 @@ export class SettingsStore {
           defaults: sanitize({ ...DEFAULT_SETTINGS.defaults, ...(raw.defaults ?? {}) }),
           remoteAccess: sanitizeRemoteAccess(raw.remoteAccess),
           account: sanitizeAccount(raw.account),
+          connectChoices: sanitizeChoices(raw.connectChoices),
         };
       } catch {
         // Settings are cheap to lose; the defaults are a working configuration.
@@ -108,12 +122,17 @@ export class SettingsStore {
   async update(patch: {
     defaults?: Partial<AppSettings['defaults']>;
     remoteAccess?: Partial<RemoteAccessSettings>;
+    /** Merged, not replaced: one computer's choice never clears another's. */
+    connectChoices?: ConnectChoices;
     /** null clears a field, e.g. on sign-out. */
     account?: { serverUrl?: string | null; email?: string | null; forceRelay?: boolean | null };
   }): Promise<AppSettings> {
     this.data.defaults = sanitize({ ...this.data.defaults, ...(patch?.defaults ?? {}) });
     if (patch?.remoteAccess) {
       this.data.remoteAccess = sanitizeRemoteAccess({ ...this.data.remoteAccess, ...patch.remoteAccess });
+    }
+    if (patch?.connectChoices) {
+      this.data.connectChoices = sanitizeChoices({ ...this.data.connectChoices, ...patch.connectChoices });
     }
     if (patch?.account) {
       const next: Record<string, unknown> = { ...this.data.account };
@@ -166,6 +185,25 @@ function sanitizeRemoteAccess(input: unknown): RemoteAccessSettings {
      scalar. That scalar *was* the credential: anyone who could read this file
      could connect. Trusted device keys replaced it (apps/desktop/src/trusted.ts),
      and any leftover fields are dropped on load rather than honoured. */
+  return out;
+}
+
+/**
+ * Device IDs mapped to one of the three ways in, and nothing else. A
+ * hand-edited or stale file cannot introduce a fourth, and cannot grow without
+ * bound: a list this long is already far more computers than anyone has.
+ */
+function sanitizeChoices(input: unknown): ConnectChoices {
+  const out: ConnectChoices = {};
+  if (typeof input !== 'object' || input === null) return out;
+  let kept = 0;
+  for (const [deviceId, method] of Object.entries(input as Record<string, unknown>)) {
+    if (kept >= 500) break;
+    if (!/^HD-[0-9A-HJKMNP-TV-Z]{4}-[0-9A-HJKMNP-TV-Z]{4}$/.test(deviceId)) continue;
+    if (method !== 'trusted' && method !== 'ask' && method !== 'code') continue;
+    out[deviceId] = method;
+    kept++;
+  }
   return out;
 }
 
