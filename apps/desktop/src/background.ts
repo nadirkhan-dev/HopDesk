@@ -1,3 +1,9 @@
+import { existsSync, mkdirSync, writeFileSync, unlinkSync } from 'node:fs';
+import { homedir } from 'node:os';
+import path from 'node:path';
+import { spawnSync } from 'node:child_process';
+import { UNIT_NAME, executablePath, unitText } from './login-item.js';
+import { trayState } from './tray-state.js';
 import { app, Tray, Menu, nativeImage, powerMonitor, Notification, type NativeImage } from 'electron';
 import type { HostStatus } from './host.js';
 
@@ -64,11 +70,9 @@ export class BackgroundMode {
     if (!this.tray) return;
     const status = this.opts.status();
     const sessions = status.sessions ?? [];
-    const connected = sessions.length > 0;
-    this.tray.setImage(trayIcon(connected));
-    this.tray.setToolTip(connected
-      ? `HopDesk — ${sessions.length} computer${sessions.length > 1 ? 's' : ''} connected`
-      : status.enabled && status.listening ? 'HopDesk — ready for connections' : 'HopDesk — not sharing');
+    const state = trayState(status);
+    this.tray.setImage(trayIcon(state.connected));
+    this.tray.setToolTip(state.tooltip);
     this.tray.setContextMenu(Menu.buildFromTemplate(this.menu(status, sessions)));
 
     /* Someone connecting while nobody is watching the screen should be visible
@@ -83,12 +87,7 @@ export class BackgroundMode {
 
   private menu(status: HostStatus, sessions: HostStatus['sessions']): Electron.MenuItemConstructorOptions[] {
     const items: Electron.MenuItemConstructorOptions[] = [
-      {
-        label: sessions.length
-          ? `${sessions.length} computer${sessions.length > 1 ? 's' : ''} connected`
-          : status.enabled && status.listening ? 'Ready for connections' : 'Not sharing this computer',
-        enabled: false,
-      },
+      { label: trayState(status).label, enabled: false },
     ];
     if (status.enabled && status.listening && status.deviceId) {
       items.push({ label: `Device ID: ${status.deviceId}`, enabled: false });
@@ -146,7 +145,9 @@ export class BackgroundMode {
    * kind of broken.
    */
   shouldHideOnClose(): boolean {
-    if (process.platform !== 'darwin' || this.quitting) return false;
+    /* Wherever there is a tray icon to find it by again. Linux has one now, so
+       closing the window there means the same thing it means on a Mac. */
+    if (!this.tray || this.quitting) return false;
     const status = this.opts.status();
     return status.enabled || status.sessions.length > 0;
   }
@@ -163,10 +164,51 @@ export class BackgroundMode {
 }
 
 export function openAtLogin(): boolean {
+  if (process.platform === 'linux') return linuxUnitEnabled();
   try {
     return app.getLoginItemSettings().openAtLogin;
   } catch {
     return false;
+  }
+}
+
+/* ------------------------------------------------- Linux: a systemd unit */
+
+const unitDir = () => path.join(homedir(), '.config', 'systemd', 'user');
+const unitPath = () => path.join(unitDir(), UNIT_NAME);
+
+/** Whether systemd will start HopDesk for this user. */
+function linuxUnitEnabled(): boolean {
+  try {
+    if (!existsSync(unitPath())) return false;
+    // systemd's own answer, not the file's existence: it may be installed and off.
+    const result = spawnSync('systemctl', ['--user', 'is-enabled', UNIT_NAME], { encoding: 'utf8' });
+    return result.stdout.trim() === 'enabled';
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Writes (or removes) the unit and tells systemd about it.
+ *
+ * Throws with what systemd said, rather than quietly doing nothing: a switch
+ * that reports success and leaves the computer unreachable after a reboot is
+ * worse than one that says it failed.
+ */
+function setLinuxUnit(open: boolean): void {
+  if (!open) {
+    spawnSync('systemctl', ['--user', 'disable', '--now', UNIT_NAME], { encoding: 'utf8' });
+    try { unlinkSync(unitPath()); } catch { /* already gone */ }
+    spawnSync('systemctl', ['--user', 'daemon-reload'], { encoding: 'utf8' });
+    return;
+  }
+  mkdirSync(unitDir(), { recursive: true });
+  writeFileSync(unitPath(), unitText(executablePath()), { mode: 0o644 });
+  spawnSync('systemctl', ['--user', 'daemon-reload'], { encoding: 'utf8' });
+  const enabled = spawnSync('systemctl', ['--user', 'enable', UNIT_NAME], { encoding: 'utf8' });
+  if (enabled.status !== 0) {
+    throw new Error(`systemd would not enable it: ${(enabled.stderr || enabled.stdout || '').trim()}`);
   }
 }
 
@@ -176,6 +218,7 @@ export function openAtLogin(): boolean {
  * with nobody logged in should not be reachable.
  */
 export function setOpenAtLogin(open: boolean): void {
+  if (process.platform === 'linux') { setLinuxUnit(open); return; }
   try {
     app.setLoginItemSettings({ openAtLogin: open });
   } catch {
