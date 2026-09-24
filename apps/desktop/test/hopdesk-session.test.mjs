@@ -426,7 +426,7 @@ test('pairing once, then connecting with one click: no code, no prompt, and revo
   const viewer = await startViewer();
   try {
     /* Before pairing, the viewer has nothing saved and cannot connect without a code. */
-    assert.equal(await viewer.eval(`return document.querySelector('#saved').hidden`), true);
+    assert.equal(await viewer.eval(`return document.querySelector('#computers').hidden`), true);
     const refused = await viewer.eval(`
       try { await window.hopdesk.connectSaved(${JSON.stringify(host.deviceId)}); return 'connected'; }
       catch (e) { return e.message; }`);
@@ -449,15 +449,15 @@ test('pairing once, then connecting with one click: no code, no prompt, and revo
     await viewer.eval(`document.querySelector('#hd-disconnect').click(); return true`);
     await viewer.waitFor(`return document.querySelector('#hd-view')?.hidden === true`, 15_000, 'the session to end');
     const saved = await viewer.waitFor(`
-      return document.querySelector('#saved').hidden ? null
-        : [...document.querySelectorAll('#saved-list .saved-row b')].map(b => b.textContent)`,
+      return document.querySelector('#computers').hidden ? null
+        : [...document.querySelectorAll('#computers-list .computer-row b')].map(b => b.textContent)`,
       15_000, 'the saved computer on the viewer');
     assert.equal(saved.length, 1, `saved computers: ${JSON.stringify(saved)}`);
 
     /* One click. No code typed, and nobody answers anything on the host. */
     assert.equal(await host.eval(`return document.querySelector('#dlg-consent')?.open === true`), false);
     await viewer.eval(`
-      [...document.querySelectorAll('#saved-list .saved-row')]
+      [...document.querySelectorAll('#computers-list .computer-row')]
         .find(r => r.textContent.includes(${JSON.stringify(host.deviceId)}))
         .querySelector('.btn.primary').click();
       return true`);
@@ -639,9 +639,10 @@ test('full screen, the hiding toolbar, the scaling modes and the remote pointer'
 
 test('on Linux there is no macOS setup to do, and nothing pretends otherwise',
   { skip, timeout: 120_000 }, async () => {
-  /* The permission wizard and panel belong to macOS. On a computer with no
-     permissions to ask for they must stay out of the way — and the menu bar
-     item must not appear either, since quitting here really means quitting. */
+  /* The permission wizard and panel belong to macOS: on a computer with no
+     permissions to ask for they must stay out of the way. "Open at login" is
+     not one of those things any more - on Linux it installs a systemd user
+     service - so it is expected here, and expected to work. */
   const app = await startViewer();
   try {
     const state = await app.eval(`
@@ -657,7 +658,8 @@ test('on Linux there is no macOS setup to do, and nothing pretends otherwise',
     assert.equal(state.wizardOpen, false, 'the macOS setup wizard opened on Linux');
     assert.equal(state.panelHidden, true, 'the macOS permissions panel showed on Linux');
     assert.equal(state.setupButtonHidden, true);
-    assert.equal(state.loginItem.supported, false, 'Linux offered "open at login"');
+    assert.equal(state.loginItem.supported, true,
+      'Linux no longer offers "open at login", which is how a computer stays reachable after a reboot');
   } finally {
     await app.close();
   }

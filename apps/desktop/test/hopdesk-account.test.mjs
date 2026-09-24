@@ -75,7 +75,7 @@ async function signIn(app, url, { create = false } = {}) {
   await app.waitFor(`
     const error = document.querySelector('#si-error');
     if (error && !error.hidden) throw new Error(error.textContent);
-    return document.querySelector('#mycomputers')?.hidden === false`, 30_000, 'to be signed in');
+    return document.querySelector('#computers')?.hidden === false`, 30_000, 'to be signed in');
 }
 
 test('two computers sign in to a HopDesk server and connect through it, with no Device ID typed',
@@ -95,15 +95,15 @@ test('two computers sign in to a HopDesk server and connect through it, with no 
     await signIn(viewer, server.url);
     await viewer.waitFor(`return document.querySelector('#mc-relay')?.textContent === 'Connected'`, 20_000, 'the viewer connected to the server');
 
-    /* The host appears in My computers, online, with a Connect button. */
+    /* The host appears in the computers list, online, with a way in. */
     await viewer.eval(`document.querySelector('#mc-refresh').click(); return true`);
     const listed = await waitFor(async () => {
       const rows = await viewer.eval(`
-        return [...document.querySelectorAll('#mc-list .computer')].map(r => ({
+        return [...document.querySelectorAll('.computer-row')].map(r => ({
           id: r.dataset.deviceId,
-          name: r.querySelector('.name').textContent,
-          online: r.querySelector('.dot').classList.contains('on'),
-          canConnect: !r.querySelector('button.primary').disabled,
+          name: r.querySelector('b').textContent,
+          online: r.dataset.status === 'online',
+          canConnect: !r.querySelector('.connect-go').disabled,
         }))`);
       return rows.length && rows[0].online && rows[0].canConnect ? rows : null;
     }, 30_000, 'the host to be listed as online');
@@ -112,7 +112,7 @@ test('two computers sign in to a HopDesk server and connect through it, with no 
     assert.match(listed[0].id, /^HD-/);
 
     /* One click connects: the server introduces the two computers. */
-    await viewer.eval(`document.querySelector('#mc-list .computer button.primary').click(); return true`);
+    await viewer.eval(`document.querySelector('.computer-row .connect-go').click(); return true`);
     await host.waitFor(`return document.querySelector('#dlg-consent')?.open === true`, 30_000, 'the Allow prompt');
     const method = await host.eval(`return document.querySelector('#consent-method').textContent`);
     assert.match(method, /same HopDesk account/i, method);
@@ -168,7 +168,7 @@ test('signing out removes that computer from the account and from the other comp
   try {
     await signIn(host, server.url, { create: true });
     await signIn(viewer, server.url);
-    await viewer.waitFor(`return document.querySelector('#mc-list .computer') !== null`, 30_000, 'the host in the list');
+    await viewer.waitFor(`return document.querySelector('.computer-row') !== null`, 30_000, 'the host in the list');
 
     /* Signing out on the host removes it from the account, so the viewer can no
        longer reach it — the door closes rather than just being hidden. */
@@ -177,10 +177,10 @@ test('signing out removes that computer from the account and from the other comp
     assert.equal(state.computers.length, 0);
 
     await viewer.eval(`document.querySelector('#mc-refresh').click(); return true`);
-    await viewer.waitFor(`return document.querySelectorAll('#mc-list .computer').length === 0`, 20_000, 'the host to disappear');
+    await viewer.waitFor(`return document.querySelectorAll('.computer-row').length === 0`, 20_000, 'the host to disappear');
 
     // And the host's own interface shows it is no longer signed in.
-    assert.equal(await host.eval(`return document.querySelector('#mycomputers')?.hidden`), true);
+    assert.equal(await host.eval(`return document.querySelector('#computers')?.hidden`), true);
     assert.equal(await host.eval(`return document.querySelector('#btn-signin')?.hidden`), false);
   } finally {
     await viewer.close();
@@ -211,7 +211,7 @@ test('a wrong password, and a server that is not there, are reported without sig
     await app.waitFor(`return document.querySelector('#si-error')?.hidden === false`, 20_000, 'an error message');
     const wrong = await app.eval(`return document.querySelector('#si-error').textContent`);
     assert.match(wrong, /do not match an account/i, wrong);
-    assert.equal(await app.eval(`return document.querySelector('#mycomputers')?.hidden`), true);
+    assert.equal(await app.eval(`return document.querySelector('#computers')?.hidden`), true);
 
     /* A plain http address that is not loopback is refused before anything is
        sent, so a password cannot go out unencrypted. */
