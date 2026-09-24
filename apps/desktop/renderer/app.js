@@ -50,6 +50,10 @@ function renderList() {
     !term || c.name.toLowerCase().includes(term) || c.host.toLowerCase().includes(term)
     || (c.username ?? '').toLowerCase().includes(term));
   $('#count').textContent = state.connections.length ? String(state.connections.length) : '';
+  /* A column of nothing is worse than no column: the VNC and RDP list appears
+     once there is something in it, and "Add computer" in the header is how the
+     first one gets there. */
+  $('aside').hidden = !state.connections.length;
 
   if (!items.length) {
     list.innerHTML = `<p class="muted" style="padding:16px;text-align:center;font-size:13px">
@@ -110,6 +114,16 @@ document.addEventListener('keydown', e => { if (e.key === 'Escape') $('#menu').h
 
 /* ------------------------------------------------------------ the pane */
 
+/**
+ * The main area shows one of two things: home, or the computer chosen in the
+ * list. Home is what an empty pane used to be, and is where sharing this
+ * computer and connecting to another one now live.
+ */
+function showHome(home) {
+  $('#home').hidden = !home;
+  $('#pane').hidden = home;
+}
+
 function renderPane() {
   const pane = $('#pane');
   const c = state.connections.find(x => x.id === state.selected);
@@ -117,6 +131,7 @@ function renderPane() {
   const live = s && ['connected', 'connecting', 'reconnecting'].includes(s.state);
 
   if (c && live && c.protocol === 'vnc' && screen.connectionId === c.id) {
+    showHome(false);
     renderSession(pane, c, s);
     return;
   }
@@ -124,31 +139,15 @@ function renderPane() {
   document.body.classList.remove('focus-session');
   view.observer?.disconnect();
 
+  /* Nothing chosen: home, rather than an invitation to add a VNC computer.
+     That invitation was the same three buttons as "Add computer" in the
+     header, filling the window of an application whose main job is elsewhere. */
   if (!c) {
-    pane.innerHTML = state.connections.length ? `
-      <div class="empty"><div>
-        <h1>Choose a computer</h1>
-        <p class="muted">Select a computer on the left, or double-click it to connect.</p>
-      </div></div>` : `
-      <div class="empty"><div>
-        <h1>Add your first computer</h1>
-        <p class="muted" style="max-width:420px;margin:8px auto 0;line-height:1.6">
-          Control a Windows PC, a Mac or a Linux computer from here.
-          What kind of computer do you want to reach?
-        </p>
-        <div class="choices">
-          ${['windows', 'macos', 'linux'].map(os => `
-            <button class="choice" data-os="${os}">${osBadge(os)}<b>${OS_NAME[os]}</b>
-              <small>${os === 'windows' ? 'Remote Desktop' : os === 'macos' ? 'Screen Sharing' : 'Remote Desktop or VNC'}</small></button>`).join('')}
-        </div>
-        <p class="muted" style="margin-top:22px;font-size:13px">
-          Or <button class="btn ghost" id="btn-empty-discover">find computers on this network</button>
-        </p>
-      </div></div>`;
-    pane.querySelectorAll('.choice').forEach(b => { b.onclick = () => openEditor(null, { os: b.dataset.os }); });
-    $('#btn-empty-discover') && ($('#btn-empty-discover').onclick = () => discover());
+    pane.innerHTML = '';
+    showHome(true);
     return;
   }
+  showHome(false);
 
   const trusted = c.protocol === 'rdp' && c.options?.trustedCertificate;
   pane.innerHTML = `

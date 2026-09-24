@@ -83,6 +83,19 @@
 
   main { flex: 1; display: flex; min-height: 0; }
 
+  /* ------------------------------------------------------------------- home */
+  /* Two cards side by side where there is room, one under the other where
+     there is not, and the list of computers connected to before underneath. */
+  .home { flex: 1; min-width: 0; overflow-y: auto; padding: 24px 18px; }
+  .home-grid {
+    display: grid; gap: 16px; align-items: start;
+    grid-template-columns: repeat(auto-fit, minmax(300px, 1fr));
+    max-width: 920px; margin: 0 auto;
+  }
+  .home > #saved { max-width: 920px; margin: 16px auto 0; }
+  .home .card { margin: 0; }
+  body.hd-session .home, body.focus-session .home { display: none; }
+
   /* ---------------------------------------------------------------- sidebar */
   aside {
     width: 300px; background: var(--surface); border-right: 1px solid var(--border);
@@ -375,98 +388,117 @@
 
 <main>
   <aside>
-    <section class="card" id="mine">
-      <div class="card-head">THIS COMPUTER</div>
-      <div class="row"><span class="dot off" id="mine-dot"></span><span id="mine-state">Off</span>
-        <button class="btn ghost small" id="mine-toggle">Turn on</button></div>
-      <div class="field">
-        <label for="mine-id">Device ID</label>
-        <div class="value-row"><output class="mono big" id="mine-id">—</output>
-          <button class="btn ghost small" id="mine-copy-id">Copy</button></div>
-      </div>
-      <div class="field">
-        <label for="mine-code">Access code</label>
-        <div class="value-row"><output class="mono big" id="mine-code">— — —</output>
-          <button class="btn ghost small" id="mine-copy-code">Copy</button>
-          <button class="btn ghost small" id="mine-regen" title="Replace the access code">New code</button></div>
-      </div>
-      <!-- Only on a computer with more than one screen: which one is shared. -->
-      <div class="field" id="mine-screen-field" hidden>
-        <label for="mine-screen">Screen to share</label>
-        <select id="mine-screen"></select>
-        <p class="hint">Only this screen is shared. Windows on the other screen are not in the picture.</p>
-      </div>
-      <p class="hint" id="mine-protection"></p>
-      <p class="warn-text" id="mine-detail" hidden></p>
-      <button class="btn small" id="mine-fix" hidden>Open System Settings</button>
-      <button class="btn small primary" id="mine-setup" hidden>Set up permissions</button>
-      <!-- macOS: every permission hosting needs, allowed or not. -->
-      <div class="perms" id="mine-perms" hidden></div>
-      <!-- Computers allowed in without asking, and how to stop trusting them. -->
-      <label class="check" id="mine-login" hidden>
-        <input type="checkbox" id="mine-login-check">
-        Open HopDesk at login, so this computer can be reached after a restart
-      </label>
-      <details class="section" id="mine-trusted" hidden>
-        <summary>Computers you trust</summary>
-        <p class="hint" id="mine-trusted-hint">These can connect at any time without an access code and without asking.</p>
-        <div id="mine-trusted-list"></div>
-      </details>
-      <div id="mine-sessions" hidden></div>
-    </section>
 
-    <!-- Computers that paired with this one: one click, no code. -->
-    <section class="card" id="saved" hidden>
-      <div class="card-head">SAVED COMPUTERS</div>
-      <div id="saved-list"></div>
-    </section>
 
-    <section class="card" id="connect">
-      <div class="card-head">CONNECT</div>
-      <div class="field">
-        <label for="cd-id">Device ID</label>
-        <input id="cd-id" placeholder="HD-7K3M-Q9TX" autocomplete="off" spellcheck="false">
-      </div>
-      <div class="field">
-        <label for="cd-code">Access code</label>
-        <input id="cd-code" placeholder="739 421" autocomplete="off" inputmode="numeric">
-      </div>
-      <button class="btn primary wide" id="btn-connect-device">Connect</button>
-      <p class="error-text" id="cd-error" hidden></p>
-      <div class="or"><span>or</span></div>
-      <button class="btn wide" id="btn-signin">Sign in to a HopDesk server</button>
-      <details id="cd-more">
-        <summary>More options</summary>
-        <div class="field">
-          <label for="cd-address">Address (only if this network blocks discovery)</label>
-          <input id="cd-address" placeholder="192.168.1.20" autocomplete="off" spellcheck="false">
-        </div>
-        <p class="hint mono" id="cd-error-detail" hidden></p>
-      </details>
-    </section>
 
-    <section class="card" id="mycomputers" hidden>
-      <div class="card-head">MY COMPUTERS <span id="mc-relay" class="badge"></span></div>
-      <div id="mc-list"></div>
-      <p class="hint" id="mc-detail"></p>
-      <div class="row">
-        <button class="btn ghost small" id="mc-refresh">Refresh</button>
-        <button class="btn ghost small" id="mc-signout">Sign out</button>
-      </div>
-    </section>
 
-    <details class="advanced" id="advanced">
-      <summary>Advanced connection (VNC, RDP)</summary>
-      <div class="list-head"><span>Computers</span><span id="count"></span></div>
+    <div class="advanced" id="advanced">
+      <div class="list-head"><span>COMPUTERS (VNC, RDP)</span><span id="count"></span></div>
       <div class="list" id="list" role="listbox" aria-label="Saved computers"></div>
       <div class="nearby" id="nearby" hidden>
         <div class="list-head"><span>On this network</span><button class="btn ghost" id="btn-nearby-close" aria-label="Hide">✕</button></div>
         <div class="list" id="nearby-list" aria-live="polite"></div>
       </div>
-    </details>
+    </div>
   </aside>
 
-  <section class="pane" id="pane"></section>
+  <section class="pane" id="pane" hidden></section>
+
+  <!--
+    Home: sharing this computer, and reaching another one.
+
+    In the main area rather than the sidebar, because these are the two things
+    the application is for and a 300px column made them a stack to scroll. What
+    used to be here - a second way to add a VNC computer, with the same three
+    buttons as "Add computer" in the header - is gone; one of them was enough.
+  -->
+  <section class="home" id="home">
+    <div class="home-grid">
+          <section class="card" id="mine">
+            <div class="card-head">THIS COMPUTER</div>
+            <div class="row"><span class="dot off" id="mine-dot"></span><span id="mine-state">Off</span>
+              <button class="btn ghost small" id="mine-toggle">Turn on</button></div>
+            <div class="field">
+              <label for="mine-id">Device ID</label>
+              <div class="value-row"><output class="mono big" id="mine-id">—</output>
+                <button class="btn ghost small" id="mine-copy-id">Copy</button></div>
+            </div>
+            <div class="field">
+              <label for="mine-code">Access code</label>
+              <div class="value-row"><output class="mono big" id="mine-code">— — —</output>
+                <button class="btn ghost small" id="mine-copy-code">Copy</button>
+                <button class="btn ghost small" id="mine-regen" title="Replace the access code">New code</button></div>
+            </div>
+            <!-- Only on a computer with more than one screen: which one is shared. -->
+            <div class="field" id="mine-screen-field" hidden>
+              <label for="mine-screen">Screen to share</label>
+              <select id="mine-screen"></select>
+              <p class="hint">Only this screen is shared. Windows on the other screen are not in the picture.</p>
+            </div>
+            <p class="hint" id="mine-protection"></p>
+            <p class="warn-text" id="mine-detail" hidden></p>
+            <button class="btn small" id="mine-fix" hidden>Open System Settings</button>
+            <button class="btn small primary" id="mine-setup" hidden>Set up permissions</button>
+            <!-- macOS: every permission hosting needs, allowed or not. -->
+            <div class="perms" id="mine-perms" hidden></div>
+            <!-- Computers allowed in without asking, and how to stop trusting them. -->
+            <label class="check" id="mine-login" hidden>
+              <input type="checkbox" id="mine-login-check">
+              Open HopDesk at login, so this computer can be reached after a restart
+            </label>
+            <details class="section" id="mine-trusted" hidden>
+              <summary>Computers you trust</summary>
+              <p class="hint" id="mine-trusted-hint">These can connect at any time without an access code and without asking.</p>
+              <div id="mine-trusted-list"></div>
+            </details>
+            <div id="mine-sessions" hidden></div>
+          </section>
+
+          <section class="card" id="connect">
+            <div class="card-head">CONNECT</div>
+            <div class="field">
+              <label for="cd-id">Device ID</label>
+              <input id="cd-id" placeholder="HD-7K3M-Q9TX" autocomplete="off" spellcheck="false">
+            </div>
+            <div class="field">
+              <label for="cd-code">Access code</label>
+              <input id="cd-code" placeholder="739 421" autocomplete="off" inputmode="numeric">
+            </div>
+            <button class="btn primary wide" id="btn-connect-device">Connect</button>
+            <p class="error-text" id="cd-error" hidden></p>
+            <div class="or"><span>or</span></div>
+            <button class="btn wide" id="btn-signin">Sign in to a HopDesk server</button>
+            <details id="cd-more">
+              <summary>More options</summary>
+              <div class="field">
+                <label for="cd-address">Address (only if this network blocks discovery)</label>
+                <input id="cd-address" placeholder="192.168.1.20" autocomplete="off" spellcheck="false">
+              </div>
+              <p class="hint mono" id="cd-error-detail" hidden></p>
+            </details>
+          </section>
+
+          <section class="card" id="mycomputers" hidden>
+            <div class="card-head">MY COMPUTERS <span id="mc-relay" class="badge"></span></div>
+            <div id="mc-list"></div>
+            <p class="hint" id="mc-detail"></p>
+            <div class="row">
+              <button class="btn ghost small" id="mc-refresh">Refresh</button>
+              <button class="btn ghost small" id="mc-signout">Sign out</button>
+            </div>
+          </section>
+    </div>
+        <!-- Computers that paired with this one: one click, no code. -->
+        <section class="card" id="saved" hidden>
+          <div class="card-head">RECENT COMPUTERS</div>
+          <div id="saved-list"></div>
+          <p class="hint" id="saved-hint" hidden>
+            To connect with one click next time, tick "Let this computer connect again without asking"
+            on the other computer when it asks whether to allow you in.
+          </p>
+        </section>
+  </section>
+
 
   <!-- A live HopDesk session: the other computer's screen. -->
   <section class="hd-view" id="hd-view" hidden>

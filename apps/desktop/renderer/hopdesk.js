@@ -264,12 +264,18 @@ export function initHopdesk({ api, toast, confirmDialog }) {
   /** Saved computers: the ones that paired with this one. One click connects. */
   async function renderSaved() {
     const devices = (await api.knownDevices?.()) ?? [];
-    const paired = devices.filter(d => d.paired);
+    /* Every computer this one has connected to before, not only the ones that
+       will let it back in without a code. Typing a Device ID again for a
+       computer HopDesk already knows is work it can do itself: the ID goes in
+       for you, and where the other computer agreed to remember this one, the
+       whole thing is one click. Most recent first, because that is almost
+       always the one wanted. */
+    const known = [...devices].sort((a, b) => (b.lastConnected ?? 0) - (a.lastConnected ?? 0));
     const card = $('#saved');
     const list = $('#saved-list');
-    card.hidden = !paired.length;
+    card.hidden = !known.length;
     list.replaceChildren();
-    for (const device of paired) {
+    for (const device of known) {
       const row = document.createElement('div');
       row.className = 'saved-row';
       const who = document.createElement('div');
@@ -277,12 +283,24 @@ export function initHopdesk({ api, toast, confirmDialog }) {
       const name = document.createElement('b');
       name.textContent = device.name || device.deviceId;
       const detail = document.createElement('span');
-      detail.textContent = `${device.deviceId} · no code needed`;
+      detail.textContent = `${device.deviceId} · ${device.paired ? 'no code needed' : 'asks for its access code'}`;
       who.append(name, detail);
       const connect = document.createElement('button');
       connect.className = 'btn primary small';
       connect.textContent = 'Connect';
       connect.onclick = async () => {
+        /* Not paired: nothing here can skip the code - the other computer
+           decides that, by remembering this one when it allows the
+           connection. What this can do is fill in everything except the code
+           and put the cursor where it is needed. */
+        if (!device.paired) {
+          $('#cd-id').value = device.deviceId;
+          $('#cd-address').value = device.lastAddress ?? '';
+          $('#cd-code').value = '';
+          $('#cd-code').focus();
+          toast(`Enter the access code shown on ${device.name || device.deviceId}.`);
+          return;
+        }
         connect.disabled = true;
         connect.textContent = 'Connecting…';
         try {
@@ -307,6 +325,10 @@ export function initHopdesk({ api, toast, confirmDialog }) {
       row.append(who, connect, forget);
       list.append(row);
     }
+    /* Said once, under the list, rather than on every row: what to do so that
+       next time is one click. Only while something in the list still asks for
+       a code. */
+    $('#saved-hint').hidden = known.every(d => d.paired);
   }
 
   /* ------------------------------------------------- first-launch setup */
@@ -638,6 +660,10 @@ export function initHopdesk({ api, toast, confirmDialog }) {
     try {
       await api.connectDevice({ deviceId, code, ...(address ? { address } : {}) });
       $('#cd-code').value = '';
+      $('#cd-id').value = '';
+      /* The list is how this computer is reached next time, so it has to
+         appear now rather than on the next launch. */
+      void renderSaved();
     } catch (err) {
       setConnectBusy(false);
       showConnectError(err.message);

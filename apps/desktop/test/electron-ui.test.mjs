@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, readFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { launchApp, electronUnavailableReason, waitFor } from './helpers/electron.mjs';
@@ -319,6 +319,61 @@ test('the screen being shared is listed, chosen and remembered', { skip, timeout
     app = await launchApp({ env: ENV, dataDir });
     assert.equal((await app.eval(`return await window.hopdesk.hostStatus()`)).sharedScreen, other.id);
     assert.equal(await app.eval(`return document.querySelector('#mine-screen').value`), String(other.id));
+  } finally {
+    await app.close();
+  }
+});
+
+/**
+ * Connecting again to a computer this one already knows.
+ *
+ * Typing a Device ID that HopDesk has on file is work it can do itself, so
+ * every computer connected to before is listed: the ones that agreed to
+ * remember this one connect in a click, and the rest fill the form in and ask
+ * only for the code. Which of the two it is has to be visible, or a click that
+ * quietly does nothing looks broken.
+ */
+test('computers connected to before are listed, and reconnect without retyping', { skip, timeout: 90_000 }, async () => {
+  const { generateIdentity, deviceIdFromPublicKey, toBase64 } =
+    await import('../../../packages/crypto/dist/index.js');
+  const dataDir = mkdtempSync(path.join(tmpdir(), 'hopdesk-saved-'));
+  mkdirSync(path.join(dataDir, 'hopdesk'), { recursive: true });
+  const device = (name, paired, ago) => {
+    const identity = generateIdentity();
+    return {
+      deviceId: deviceIdFromPublicKey(identity.publicKey),
+      key: toBase64(identity.publicKey),
+      name,
+      lastConnected: Date.now() - ago,
+      lastAddress: '192.168.1.42',
+      lastPort: 47631,
+      ...(paired ? { paired: true } : {}),
+    };
+  };
+  const [remembers, asksForCode] = [device('Studio Mac', true, 60_000), device('Office Linux', false, 5_000)];
+  writeFileSync(path.join(dataDir, 'hopdesk', 'devices.json'),
+    JSON.stringify({ devices: [remembers, asksForCode] }));
+
+  const app = await launchApp({ env: ENV, dataDir });
+  try {
+    await app.waitFor(`return document.querySelectorAll('.saved-row').length === 2`, 10_000, 'both computers listed');
+    const rows = await app.eval(`return [...document.querySelectorAll('.saved-row')]
+      .map(r => r.querySelector('.who').textContent)`);
+    // Most recently used first, and each says whether a code is coming.
+    assert.match(rows[0], /Office Linux/);
+    assert.match(rows[0], /asks for its access code/);
+    assert.match(rows[1], /Studio Mac/);
+    assert.match(rows[1], /no code needed/);
+    assert.equal(await app.eval(`return !document.querySelector('#saved-hint').hidden`), true,
+      'says how to make it one click, while anything still asks for a code');
+
+    /* The one that needs a code fills the form instead of failing a
+       connection: the ID and the address it answered on last time, with the
+       cursor in the code box. */
+    await click(app, '.saved-row .btn.primary');
+    assert.equal(await app.eval(`return document.querySelector('#cd-id').value`), asksForCode.deviceId);
+    assert.equal(await app.eval(`return document.querySelector('#cd-address').value`), '192.168.1.42');
+    assert.equal(await app.eval(`return document.activeElement.id`), 'cd-code');
   } finally {
     await app.close();
   }
