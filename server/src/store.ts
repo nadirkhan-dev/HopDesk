@@ -19,6 +19,12 @@ export interface Device {
   accountId: string;
   name: string;
   publicKey: string;
+  /**
+   * What kind of computer it is - 'macos', 'linux', 'windows' - so a list of
+   * them can be read at a glance. The device says so when it enrols; it is a
+   * label, never anything to decide on.
+   */
+  os: string | null;
   createdAt: number;
   lastSeen: number | null;
 }
@@ -67,7 +73,8 @@ export class Store {
         public_key text not null,
         token_hash text not null,
         created_at integer not null,
-        last_seen integer
+        last_seen integer,
+        os text
       );
       create index if not exists devices_account on devices(account_id);
       create table if not exists throttle (
@@ -76,6 +83,19 @@ export class Store {
         until integer not null
       );
     `);
+
+    /* A column added after a server has been running: "create table if not
+       exists" leaves the existing table exactly as it is, so the column has to
+       be added separately. Checked rather than caught, because a failed ALTER
+       and a column that is already there are the same error text. */
+    this.addColumn('devices', 'os', 'text');
+  }
+
+  /** Adds a column if the table does not have it yet. */
+  private addColumn(table: string, column: string, type: string) {
+    const columns = this.db.prepare(`pragma table_info(${table})`).all() as { name?: unknown }[];
+    if (columns.some(c => String(c.name) === column)) return;
+    this.db.exec(`alter table ${table} add column ${column} ${type}`);
   }
 
   close() { this.db.close(); }
@@ -150,12 +170,14 @@ export class Store {
 
   saveDevice(device: Omit<Device, 'lastSeen'> & { tokenHash: string }) {
     this.db.prepare(`
-      insert into devices (device_id, account_id, name, public_key, token_hash, created_at)
-      values (?, ?, ?, ?, ?, ?)
+      insert into devices (device_id, account_id, name, public_key, token_hash, created_at, os)
+      values (?, ?, ?, ?, ?, ?, ?)
       on conflict(device_id) do update set
         account_id = excluded.account_id, name = excluded.name,
-        public_key = excluded.public_key, token_hash = excluded.token_hash
-    `).run(device.deviceId, device.accountId, device.name, device.publicKey, device.tokenHash, device.createdAt);
+        public_key = excluded.public_key, token_hash = excluded.token_hash,
+        os = excluded.os
+    `).run(device.deviceId, device.accountId, device.name, device.publicKey, device.tokenHash,
+      device.createdAt, device.os);
   }
 
   deviceById(deviceId: string): (Device & { tokenHash: string }) | null {
@@ -185,6 +207,7 @@ export class Store {
     return {
       deviceId: String(row.device_id), accountId: String(row.account_id), name: String(row.name),
       publicKey: String(row.public_key), tokenHash: String(row.token_hash),
+      os: row.os === null || row.os === undefined ? null : String(row.os),
       createdAt: Number(row.created_at),
       lastSeen: row.last_seen === null ? null : Number(row.last_seen),
     };

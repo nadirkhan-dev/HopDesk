@@ -34,6 +34,9 @@ const enrolBody = obj({
   deviceId: str({ max: 12, pattern: /^HD-[0-9A-HJKMNP-TV-Z]{4}-[0-9A-HJKMNP-TV-Z]{4}$/ }),
   publicKey: str({ min: 43, max: 64 }),
   name: str({ min: 1, max: 64 }),
+  /* What kind of computer, for the icon in the list. Optional: a device
+     enrolled by an older version of HopDesk simply has none. */
+  os: optional(str({ max: 16, pattern: /^[a-z]+$/ })),
   nonce: str({ min: 20, max: 64 }),
   signature: str({ min: 80, max: 128 }),
 });
@@ -208,6 +211,7 @@ export class Api {
     const devices = this.deps.store.devicesOfAccount(caller.accountId).map(d => ({
       deviceId: d.deviceId,
       name: d.name,
+      os: d.os,
       // The public key is what the other side's signature is checked against.
       publicKey: d.publicKey,
       online: this.deps.presence.isOnline(d.deviceId),
@@ -274,6 +278,7 @@ export class Api {
       accountId: caller.accountId,
       name: body.name,
       publicKey: body.publicKey,
+      os: body.os ?? existing?.os ?? null,
       tokenHash: hashToken(deviceToken),
       createdAt: existing?.createdAt ?? this.now(),
     });

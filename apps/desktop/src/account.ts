@@ -22,6 +22,8 @@ import type { LocalIdentity } from './identity.js';
 export interface AccountComputer {
   deviceId: string;
   name: string;
+  /** 'macos', 'linux', 'windows' - what the computer said when it enrolled. */
+  os: string | null;
   publicKey: string;
   online: boolean;
   lastSeen: number | null;
@@ -58,6 +60,14 @@ const REFRESH_SECRET = 'account-refresh-token';
 const DEVICE_SECRET = 'account-device-token';
 /** The label a device signs to prove it holds its key while enrolling. */
 const ENROL_LABEL = 'hopdesk/enrol/v1';
+
+/**
+ * What kind of computer this is, in the words the interface uses for an icon.
+ * Node's own names for the other platforms are already what is wanted.
+ */
+function osName(): string {
+  return process.platform === 'darwin' ? 'macos' : process.platform === 'win32' ? 'windows' : process.platform;
+}
 /** How often the list is fetched again behind the live updates. */
 const POLL_MS = 120_000;
 
@@ -196,6 +206,7 @@ export class AccountClient extends EventEmitter {
         deviceId: this.deps.identity.deviceId,
         publicKey: toBase64(this.deps.identity.identity.publicKey),
         name: this.deps.deviceName,
+        os: osName(),
         nonce: challenge.nonce,
         signature,
       },
