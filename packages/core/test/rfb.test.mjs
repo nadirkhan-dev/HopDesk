@@ -1,5 +1,6 @@
 import { test, before, after } from 'node:test';
 import assert from 'node:assert/strict';
+import { connect } from 'node:net';
 import { RfbClient, vncEncrypt, bgraToRgba } from '../dist/index.js';
 
 const HOST = '127.0.0.1';
@@ -36,7 +37,34 @@ test('BGRA converts to RGBA with opaque alpha', () => {
 
 /* ------------------------------------------ live server integration */
 
-test('connects to a real VNC server and completes the handshake', async () => {
+/**
+ * These need a VNC server answering on VNC_PORT, which `scripts/test-servers`
+ * starts. Without one they skip rather than fail: a red suite that means "you
+ * did not start the server" teaches people to ignore red suites.
+ *
+ * A suite that quietly skips proves nothing, though, so HOPDESK_REQUIRE_VNC=1
+ * - which CI sets - turns the skip back into a failure.
+ */
+const reachable = await new Promise(resolve => {
+  const socket = connect({ host: HOST, port: PORT });
+  const settle = ok => { socket.destroy(); resolve(ok); };
+  socket.setTimeout(1500);
+  socket.once('connect', () => settle(true));
+  socket.once('timeout', () => settle(false));
+  socket.once('error', () => settle(false));
+});
+const missing = `no VNC server at ${HOST}:${PORT} (scripts/test-displays.sh starts one)`;
+const required = process.env.HOPDESK_REQUIRE_VNC === '1';
+const skip = reachable || required ? false : missing;
+if (!reachable && required) {
+  // Reported as a failing test rather than thrown: a throw out here lands as
+  // "asynchronous activity after the test ended", which says nothing useful.
+  test('a VNC server is running, as HOPDESK_REQUIRE_VNC=1 demands', () => {
+    assert.fail(`${missing} - and HOPDESK_REQUIRE_VNC=1 says these tests must run`);
+  });
+}
+
+test('connects to a real VNC server and completes the handshake', { skip }, async () => {
   const client = new RfbClient({ host: HOST, port: PORT, password: PASSWORD });
   const info = await client.connect();
 
@@ -48,7 +76,7 @@ test('connects to a real VNC server and completes the handshake', async () => {
   client.disconnect();
 });
 
-test('receives real framebuffer pixels', async () => {
+test('receives real framebuffer pixels', { skip }, async () => {
   const client = new RfbClient({ host: HOST, port: PORT, password: PASSWORD });
   const info = await client.connect();
 
@@ -70,12 +98,12 @@ test('receives real framebuffer pixels', async () => {
   client.disconnect();
 });
 
-test('a wrong password is refused', async () => {
+test('a wrong password is refused', { skip }, async () => {
   const client = new RfbClient({ host: HOST, port: PORT, password: 'wrongpw' });
   await assert.rejects(() => client.connect(), /Authentication failed|password/i);
 });
 
-test('a missing password is reported clearly, not as a crash', async () => {
+test('a missing password is reported clearly, not as a crash', { skip }, async () => {
   const client = new RfbClient({ host: HOST, port: PORT });
   await assert.rejects(() => client.connect(), /needs a password/i);
 });
@@ -98,7 +126,7 @@ test('a non-VNC service is detected rather than misparsed', async () => {
   decoy.close();
 });
 
-test('input messages are accepted by a live server', async () => {
+test('input messages are accepted by a live server', { skip }, async () => {
   const client = new RfbClient({ host: HOST, port: PORT, password: PASSWORD });
   await client.connect();
 
