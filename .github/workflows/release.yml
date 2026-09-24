@@ -163,14 +163,22 @@ jobs:
           lipo -archs "$KOFFI" | tee /dev/stderr | grep -qw "$want"
           # A valid signature: without one Apple Silicon calls the app damaged.
           codesign --verify --deep --strict --verbose=2 "$APP"
+          # Written down and then read, rather than piped through tee into
+          # grep -q: grep -q leaves at the first match, tee dies of the broken
+          # pipe, and pipefail fails the step over a check that passed.
+          codesign -dvvv "$APP" > "$RUNNER_TEMP/signature.txt" 2>&1
+          cat "$RUNNER_TEMP/signature.txt"
+          codesign -d --requirements - "$APP" > "$RUNNER_TEMP/requirement.txt" 2>&1 || true
+          echo "--- what macOS will recognise this app by ---"
+          cat "$RUNNER_TEMP/requirement.txt"
           if [ -n "$MACOS_CERT_P12" ]; then
-            # Signed by our certificate, and - the point of the exercise - the
-            # rule macOS will recognise it by names the certificate rather than
-            # this build's hash, so an update keeps its permissions.
-            codesign -dvvv "$APP" 2>&1 | tee /dev/stderr | grep -q "Authority=$SIGN_IDENTITY"
-            codesign --display --requirements - "$APP" 2>&1 | tee /dev/stderr | grep -q 'certificate leaf'
+            grep -q "Authority=$SIGN_IDENTITY" "$RUNNER_TEMP/signature.txt"
+            # The point of the exercise: recognised by the certificate, which
+            # every build shares, and not by this build's own hash.
+            grep -qi "certificate" "$RUNNER_TEMP/requirement.txt"
+            ! grep -qi "cdhash" "$RUNNER_TEMP/requirement.txt"
           else
-            codesign -dv "$APP" 2>&1 | tee /dev/stderr | grep -q "Signature=adhoc"
+            grep -q "Signature=adhoc" "$RUNNER_TEMP/signature.txt"
           fi
 
       - name: Start the installed app
