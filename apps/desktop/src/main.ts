@@ -740,7 +740,13 @@ app.whenReady().then(async () => {
         void host.start().catch(err => log.warn(`could not resume remote access after waking: ${(err as Error).message}`));
       },
     });
-    background.start();
+    try {
+      background.start();
+    } catch (err) {
+      /* Nothing about the menu bar or tray is worth failing to start over. */
+      log.warn(`background mode unavailable: ${(err as Error).message}`);
+      background = null;
+    }
   }
 
   /* On a Mac, what the system allows is shown from the start — not only after

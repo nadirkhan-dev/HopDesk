@@ -450,7 +450,7 @@ test('pairing once, then connecting with one click: no code, no prompt, and revo
     await viewer.waitFor(`return document.querySelector('#hd-view')?.hidden === true`, 15_000, 'the session to end');
     const saved = await viewer.waitFor(`
       return document.querySelector('#computers').hidden ? null
-        : [...document.querySelectorAll('#computers-list .computer-row b')].map(b => b.textContent)`,
+        : [...document.querySelectorAll('#computers-list .computer-row .who b')].map(b => b.textContent)`,
       15_000, 'the saved computer on the viewer');
     assert.equal(saved.length, 1, `saved computers: ${JSON.stringify(saved)}`);
 

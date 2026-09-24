@@ -50,10 +50,26 @@ export class BackgroundMode {
   constructor(private readonly opts: BackgroundOptions) {}
 
   start(): void {
-    this.tray = new Tray(trayIcon(false));
-    this.tray.setToolTip('HopDesk');
-    this.tray.on('click', () => this.opts.show());
-    this.refresh();
+    /**
+     * A tray icon is a nicety; starting at all is not.
+     *
+     * On Linux the tray is somebody else's program - a StatusNotifier host, or
+     * the desktop's own panel - reached over the session bus. A machine
+     * without one, or with a bus that cannot be spoken to, is perfectly
+     * ordinary: a server, a bare window manager, a test runner. HopDesk has to
+     * come up there exactly as it always did, so a tray that refuses to exist
+     * is written down and then ignored. Without it, closing the window quits,
+     * which is what it did before there was a tray to find the app by.
+     */
+    try {
+      this.tray = new Tray(trayIcon(false));
+      this.tray.setToolTip('HopDesk');
+      this.tray.on('click', () => this.opts.show());
+      this.refresh();
+    } catch (err) {
+      this.tray = null;
+      this.opts.log(`no tray icon on this desktop: ${(err as Error).message}`);
+    }
 
     /* Waking up: the network was gone while asleep, so the listener and the
        announcement on the network may need starting again. */
