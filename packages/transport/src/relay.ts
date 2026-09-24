@@ -29,6 +29,24 @@ export interface RelaySessionIntro {
 
 export type RelayState = 'offline' | 'connecting' | 'online';
 
+/** Another device on this account came or went. */
+export interface PresenceChange {
+  deviceId: string;
+  online: boolean;
+  /** When the server last saw it, epoch milliseconds. */
+  lastSeen: number;
+}
+
+/**
+ * How often this computer says it is still here.
+ *
+ * The server closes a socket that has said nothing for two minutes. Nothing
+ * used to be sent between sessions, so an idle host was closed, reconnected
+ * with a backoff of up to thirty seconds, and read as offline on every other
+ * screen in the meantime - while being perfectly reachable the whole time.
+ */
+const HEARTBEAT_MS = 30_000;
+
 export interface RelayClientOptions {
   /** e.g. wss://hopdesk.example.com/ws */
   url: string;
@@ -37,6 +55,8 @@ export interface RelayClientOptions {
   /** A session another computer started with this one. */
   onIncoming: (intro: RelaySessionIntro, link: MessageLink) => void;
   onState?: (state: RelayState, detail?: string) => void;
+  /** Another device on this account connected or disconnected. */
+  onPresence?: (change: PresenceChange) => void;
   log?: (message: string) => void;
   /** Injectable for tests; defaults to the global WebSocket. */
   createSocket?: (url: string) => WebSocket;
@@ -60,6 +80,7 @@ export class RelayClient {
   private closing = false;
   private attempt = 0;
   private retryTimer: NodeJS.Timeout | null = null;
+  private heartbeatTimer: NodeJS.Timeout | null = null;
 
   constructor(private readonly opts: RelayClientOptions) {}
 
@@ -92,6 +113,7 @@ export class RelayClient {
     socket.onclose = event => {
       const wasOnline = this.state === 'online';
       this.socket = null;
+      this.stopHeartbeat();
       for (const [id] of this.sessions) this.endSession(id, 'the connection to the server was lost');
       for (const [, pending] of this.pendingConnects) pending.reject(new RelayError('offline', 'The connection to the server was lost'));
       this.pendingConnects.clear();
@@ -129,6 +151,22 @@ export class RelayClient {
     this.retryTimer.unref?.();
   }
 
+  /** Says "still here" often enough that the server never closes this socket. */
+  private startHeartbeat() {
+    this.stopHeartbeat();
+    this.heartbeatTimer = setInterval(() => {
+      if (this.socket?.readyState !== 1) return;
+      try { this.socket.send(JSON.stringify({ type: 'ping' })); } catch { /* the close handler deals with it */ }
+    }, HEARTBEAT_MS);
+    this.heartbeatTimer.unref?.();
+  }
+
+  private stopHeartbeat() {
+    if (!this.heartbeatTimer) return;
+    clearInterval(this.heartbeatTimer);
+    this.heartbeatTimer = null;
+  }
+
   private setState(state: RelayState, detail?: string) {
     if (this.state === state) return;
     this.state = state;
@@ -146,9 +184,23 @@ export class RelayClient {
       case 'ready':
         this.attempt = 0;
         this.setState('online');
+        this.startHeartbeat();
         this.opts.log?.(`relay: connected as ${String(message.deviceId)}`);
         resolve?.();
         return;
+
+      case 'pong':
+        return;                                   // proof the socket is alive
+
+      case 'presence': {
+        if (typeof message.deviceId !== 'string' || typeof message.online !== 'boolean') return;
+        this.opts.onPresence?.({
+          deviceId: message.deviceId,
+          online: message.online,
+          lastSeen: typeof message.lastSeen === 'number' ? message.lastSeen : Date.now(),
+        });
+        return;
+      }
 
       case 'session': {
         const intro = this.toIntro(message);
@@ -242,6 +294,7 @@ export class RelayClient {
 
   close() {
     this.closing = true;
+    this.stopHeartbeat();
     if (this.retryTimer) { clearTimeout(this.retryTimer); this.retryTimer = null; }
     for (const [id] of this.sessions) this.endSession(id, 'closed');
     this.socket?.close();

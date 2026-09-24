@@ -48,6 +48,8 @@ export interface SignalingDependencies {
 export class SignalingServer {
   private readonly wss: WebSocketServer;
   private readonly now: () => number;
+  /** Set by close(), so a socket closing during shutdown writes nothing. */
+  private stopping = false;
 
   constructor(private readonly deps: SignalingDependencies) {
     this.now = deps.now ?? Date.now;
@@ -183,6 +185,17 @@ export class SignalingServer {
       clearInterval(idleTimer);
       if (connection) {
         this.deps.presence.remove(connection);
+        /* Stamped on the way out as well as on the way in, so "last seen" is
+           when the device was last here rather than when it last arrived -
+           which, for a computer that stayed connected for a week, is a very
+           different date.
+
+           Not while the server is stopping: shutdown closes these sockets
+           after the database, and a write then throws "database is not open"
+           from inside an event handler, where nothing can catch it. */
+        if (!this.stopping) {
+          try { this.deps.store.touchDevice(connection.deviceId, this.now()); } catch { /* going away anyway */ }
+        }
         this.deps.log(`device ${connection.deviceId} disconnected`);
       }
     });
@@ -190,6 +203,7 @@ export class SignalingServer {
   }
 
   close() {
+    this.stopping = true;
     for (const client of this.wss.clients) client.close(1001, 'server stopping');
     this.wss.close();
   }

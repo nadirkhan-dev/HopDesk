@@ -24,17 +24,44 @@ export class Presence {
 
   constructor(private readonly now: () => number = Date.now) {}
 
-  /** Registers a device, replacing an older connection for the same device. */
+  /**
+   * Registers a device, replacing an older connection for the same device, and
+   * tells the rest of the account it is here.
+   *
+   * Telling them matters: without it a computer that came back an hour ago
+   * still reads as offline on every other screen until someone presses
+   * Refresh, and a list that lies about who is reachable is worse than no
+   * list at all.
+   */
   add(connection: Connection): void {
     const existing = this.online.get(connection.deviceId);
     if (existing && existing !== connection) existing.close(4001, 'replaced by a newer connection');
     this.online.set(connection.deviceId, connection);
+    // A replaced connection is the same device arriving again, not a change.
+    if (!existing) this.announce(connection, true);
   }
 
   remove(connection: Connection): void {
-    if (this.online.get(connection.deviceId) === connection) this.online.delete(connection.deviceId);
+    const wasHere = this.online.get(connection.deviceId) === connection;
+    if (wasHere) this.online.delete(connection.deviceId);
     for (const session of [...this.sessions.values()]) {
       if (session.a === connection || session.b === connection) this.endSession(session.id, 'peer-disconnected');
+    }
+    /* Not when the device is already back on another socket: it is online, and
+       saying otherwise would make it blink off on every reconnection. */
+    if (wasHere && !this.online.has(connection.deviceId)) this.announce(connection, false);
+  }
+
+  /**
+   * Tells the account's other devices that one of them came or went. Only ever
+   * a device id and a timestamp - the same thing `GET /api/devices` already
+   * says, arriving when it changes rather than when someone asks.
+   */
+  private announce(connection: Connection, online: boolean): void {
+    const message = { type: 'presence', deviceId: connection.deviceId, online, lastSeen: this.now() };
+    for (const other of this.online.values()) {
+      if (other === connection || other.accountId !== connection.accountId) continue;
+      try { other.send(message); } catch { /* it will find out when it reconnects */ }
     }
   }
 

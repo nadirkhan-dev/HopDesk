@@ -268,3 +268,75 @@ test('a complete HopDesk handshake runs through the relay, which cannot read it'
     viewerResult.control.close();
   } finally { await server.close(); }
 });
+
+/**
+ * Live status: the other devices on the account are told when one arrives or
+ * leaves, rather than finding out when somebody presses Refresh.
+ *
+ * The message carries no more than `GET /api/devices` already says - a device
+ * id, whether it is here, and when it was last seen - so a live list costs the
+ * account no privacy it had not already given the server.
+ */
+test('the account is told when one of its computers comes and goes', async () => {
+  const server = await testServer();
+  try {
+    const session = await signIn(server);
+    const watcher = await enrolDevice(server, session, 'Desk Mac');
+    const comer = await enrolDevice(server, session, 'Office PC');
+
+    const a = await connected(server, watcher.deviceToken);
+    const b = await connected(server, comer.deviceToken);
+
+    const arrived = await a.next(m => m.type === 'presence');
+    assert.equal(arrived.deviceId, comer.deviceId);
+    assert.equal(arrived.online, true);
+    assert.ok(arrived.lastSeen > 0, 'no time came with the arrival');
+
+    b.close();
+    await b.closed;
+    const left = await a.next(m => m.type === 'presence' && m.online === false);
+    assert.equal(left.deviceId, comer.deviceId);
+
+    /* Leaving is also when "last seen" is written: for a computer that stayed
+       connected for a week, when it arrived is the wrong answer. */
+    const listed = await server.call('GET', '/api/devices', { token: session.accessToken });
+    const row = listed.body.devices.find(d => d.deviceId === comer.deviceId);
+    assert.equal(row.online, false);
+    assert.ok(row.lastSeen >= arrived.lastSeen, 'lastSeen was not stamped on the way out');
+  } finally { await server.close(); }
+});
+
+test('another account is never told who is online', async () => {
+  const server = await testServer();
+  try {
+    const mine = await signIn(server);
+    const theirs = await signIn(server, 'someone-else@example.com');
+    const watcher = await enrolDevice(server, theirs, 'Their Laptop');
+    const comer = await enrolDevice(server, mine, 'My PC');
+
+    const a = await connected(server, watcher.deviceToken);
+    const b = await connected(server, comer.deviceToken);
+    b.close();
+    await b.closed;
+
+    // Nothing about my computer may reach their socket.
+    await new Promise(r => setTimeout(r, 150));
+    assert.equal(a.messages.filter(m => m.type === 'presence').length, 0,
+      'presence leaked across accounts');
+  } finally { await server.close(); }
+});
+
+test('a computer that keeps saying it is here is not closed as idle', async () => {
+  const server = await testServer();
+  try {
+    const session = await signIn(server);
+    const device = await enrolDevice(server, session, 'Quiet PC');
+    const c = await connected(server, device.deviceToken);
+    // What the heartbeat sends, and what proves the socket is still counted.
+    c.send({ type: 'ping' });
+    assert.ok(await c.next(m => m.type === 'pong'), 'no answer to a heartbeat');
+    assert.equal((await server.call('GET', '/api/devices', { token: session.accessToken }))
+      .body.devices[0].online, true);
+    c.close();
+  } finally { await server.close(); }
+});

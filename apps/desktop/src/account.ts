@@ -58,6 +58,8 @@ const REFRESH_SECRET = 'account-refresh-token';
 const DEVICE_SECRET = 'account-device-token';
 /** The label a device signs to prove it holds its key while enrolling. */
 const ENROL_LABEL = 'hopdesk/enrol/v1';
+/** How often the list is fetched again behind the live updates. */
+const POLL_MS = 120_000;
 
 export class AccountError extends Error {
   constructor(readonly code: string, message: string) { super(message); }
@@ -70,6 +72,7 @@ export class AccountClient extends EventEmitter {
   private accessExpiresAt = 0;
   private deviceToken: string | null = null;
   private computers: AccountComputer[] = [];
+  private pollTimer: NodeJS.Timeout | null = null;
   private accountId: string | null = null;
   private detail: string | undefined;
   private readonly fetch: typeof fetch;
@@ -243,6 +246,23 @@ export class AccountClient extends EventEmitter {
 
   /* ---------------------------------------------------------------- relay */
 
+  /**
+   * Asks for the list again now and then, as a floor under the live updates.
+   *
+   * The server says who came and went, which is what makes the list live; this
+   * is for what a push cannot cover - a message missed while this computer was
+   * asleep, a device enrolled or removed elsewhere, a server restarted. Slow
+   * on purpose: it is a safety net, not the mechanism.
+   */
+  private startPolling(): void {
+    if (this.pollTimer) return;
+    this.pollTimer = setInterval(() => {
+      if (!this.deviceToken) return;
+      void this.refreshComputers().catch(() => { /* the next one will do */ });
+    }, POLL_MS);
+    this.pollTimer.unref?.();
+  }
+
   private async connectRelay(): Promise<void> {
     const settings = this.deps.readSettings();
     if (!settings.serverUrl || !this.deviceToken) return;
@@ -252,6 +272,9 @@ export class AccountClient extends EventEmitter {
       url,
       token: this.deviceToken,
       onIncoming: (intro, link) => this.deps.onIncoming(intro, link),
+      /* The server says who came and went as it happens, so the list follows
+         without asking for it again. */
+      onPresence: change => this.applyPresence(change),
       onState: (state, detail) => {
         this.relayState = state;
         this.detail = state === 'offline' && detail ? detail : undefined;
@@ -261,7 +284,28 @@ export class AccountClient extends EventEmitter {
       log: message => this.deps.log.info(message),
     });
     this.relay = relay;
+    this.startPolling();
     await relay.connect();
+  }
+
+  /**
+   * One computer's arrival or departure, from the server.
+   *
+   * Applied to what is already known rather than fetching the list again: a
+   * whole round trip for one boolean would make a busy account chatty, and the
+   * message carries everything that changed. A device nobody has heard of -
+   * one enrolled since this list was fetched - is worth the fetch.
+   */
+  private applyPresence(change: { deviceId: string; online: boolean; lastSeen: number }): void {
+    const known = this.computers.find(c => c.deviceId === change.deviceId);
+    if (!known) {
+      void this.refreshComputers().catch(() => {});
+      return;
+    }
+    if (known.online === change.online && known.lastSeen === change.lastSeen) return;
+    known.online = change.online;
+    known.lastSeen = change.lastSeen;
+    this.emitChange();
   }
 
   /** Asks the server to introduce this computer to another one. */
@@ -273,6 +317,7 @@ export class AccountClient extends EventEmitter {
   close() {
     this.relay?.close();
     this.relay = null;
+    if (this.pollTimer) { clearInterval(this.pollTimer); this.pollTimer = null; }
   }
 
   /* ---------------------------------------------------------------- http */

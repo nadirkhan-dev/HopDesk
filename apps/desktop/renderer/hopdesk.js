@@ -565,10 +565,20 @@ export function initHopdesk({ api, toast, confirmDialog }) {
       row.dataset.deviceId = computer.deviceId;
       const dot = document.createElement('span');
       dot.className = `dot ${computer.online ? 'on' : 'off'}`;
-      const name = document.createElement('span');
-      name.className = 'name';
+      const who = document.createElement('span');
+      who.className = 'name';
+      const name = document.createElement('b');
       name.textContent = computer.name;
       name.title = computer.deviceId;
+      who.append(name);
+      /* Offline says nothing about whether the computer is switched off or was
+         last here in March, and those call for different actions. */
+      if (!computer.online) {
+        const seen = document.createElement('span');
+        seen.className = 'sub';
+        seen.textContent = lastSeenText(computer.lastSeen);
+        who.append(seen);
+      }
       const connect = document.createElement('button');
       connect.className = 'btn small primary';
       connect.textContent = 'Connect';
@@ -597,7 +607,7 @@ export function initHopdesk({ api, toast, confirmDialog }) {
           renderAccount(await api.accountRemoveComputer(computer.deviceId));
         } catch (err) { toast(friendlyError(err.message)); }
       };
-      row.append(dot, name, connect, remove);
+      row.append(dot, who, connect, remove);
       list.append(row);
     }
   };
@@ -1020,6 +1030,30 @@ export function initHopdesk({ api, toast, confirmDialog }) {
 }
 
 const formatCode = code => (code.length === 6 ? `${code.slice(0, 3)} ${code.slice(3)}` : code);
+
+/**
+ * "last seen 3 hours ago", in the words a person would use.
+ *
+ * Offline on its own says nothing about whether a computer is switched off for
+ * the night or has not been seen since March, and those call for different
+ * actions.
+ */
+export function lastSeenText(lastSeen) {
+  if (!lastSeen) return 'never connected';
+  const seconds = Math.max(0, Math.round((Date.now() - lastSeen) / 1000));
+  if (seconds < 90) return 'last seen just now';
+  const units = [
+    { limit: 3600, size: 60, one: 'a minute', many: 'minutes' },
+    { limit: 86_400, size: 3600, one: 'an hour', many: 'hours' },
+    { limit: 2_592_000, size: 86_400, one: 'a day', many: 'days' },
+  ];
+  for (const unit of units) {
+    if (seconds >= unit.limit) continue;
+    const count = Math.round(seconds / unit.size);
+    return `last seen ${count === 1 ? unit.one : `${count} ${unit.many}`} ago`;
+  }
+  return `last seen on ${new Date(lastSeen).toLocaleDateString()}`;
+}
 
 /** Handshake failures in plain words; the technical text stays available. */
 /**

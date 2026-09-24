@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { cleanMessage, friendlyError } from '../renderer/hopdesk.js';
+import { cleanMessage, friendlyError, lastSeenText } from '../renderer/hopdesk.js';
 
 /**
  * What a failure looks like to the person in front of it. Two layers of
@@ -39,4 +39,28 @@ test('every handshake failure a person can cause reads as a sentence', () => {
 test('an error nobody has written words for is passed through, tidied', () => {
   const text = friendlyError("Error invoking remote method 'connectDevice': Error: the toaster is on fire");
   assert.equal(text, 'the toaster is on fire');
+});
+
+/**
+ * When a computer was last reachable.
+ *
+ * "Offline" alone is not enough to act on: a machine switched off for the
+ * night and one that has not been seen since March look identical, and only
+ * one of them is worth waiting for.
+ */
+test('how long a computer has been away, in words', () => {
+  const ago = seconds => Date.now() - seconds * 1000;
+  assert.equal(lastSeenText(ago(5)), 'last seen just now');
+  assert.equal(lastSeenText(ago(60 * 4)), 'last seen 4 minutes ago');
+  assert.equal(lastSeenText(ago(60 * 60)), 'last seen an hour ago');
+  assert.equal(lastSeenText(ago(60 * 60 * 5)), 'last seen 5 hours ago');
+  assert.equal(lastSeenText(ago(60 * 60 * 24)), 'last seen a day ago');
+  assert.equal(lastSeenText(ago(60 * 60 * 24 * 3)), 'last seen 3 days ago');
+  // Beyond a month a date is more use than a count of days.
+  assert.match(lastSeenText(ago(60 * 60 * 24 * 90)), /^last seen on /);
+  // A device that enrolled but has never connected has no time to report.
+  assert.equal(lastSeenText(null), 'never connected');
+  assert.equal(lastSeenText(0), 'never connected');
+  // A clock that disagrees must not produce "in 2 hours".
+  assert.equal(lastSeenText(Date.now() + 60_000), 'last seen just now');
 });
