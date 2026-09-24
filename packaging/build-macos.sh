@@ -44,6 +44,8 @@ unset ELECTRON_RUN_AS_NODE
 
 extra=()
 adhoc=false
+# A certificate of our own, used when there is no Developer ID. See below.
+selfsigned=""
 if security find-identity -v -p codesigning 2>/dev/null | grep -q "Developer ID Application"; then
   echo "Signing with the Developer ID certificate in your keychain."
   if [[ -n "${APPLE_ID:-}" && -n "${APPLE_APP_SPECIFIC_PASSWORD:-}" && -n "${APPLE_TEAM_ID:-}" ]]; then
@@ -53,6 +55,23 @@ if security find-identity -v -p codesigning 2>/dev/null | grep -q "Developer ID 
     echo "No notarisation credentials: the build will be signed but not notarised." >&2
     echo "Set APPLE_ID, APPLE_APP_SPECIFIC_PASSWORD and APPLE_TEAM_ID to notarise." >&2
   fi
+elif [[ -n "${HOPDESK_SIGN_IDENTITY:-}" ]] \
+  && security find-identity -v -p codesigning 2>/dev/null | grep -qF "${HOPDESK_SIGN_IDENTITY}"; then
+  # A certificate of our own making, which Apple has never heard of.
+  #
+  # It buys one thing, and it is the thing that irritates most: macOS ties a
+  # permission to how it recognises the app again, and for an ad hoc signature
+  # that is a hash of the exact binary - so every update is a new app, and
+  # Screen Recording and Accessibility have to be granted over again. Signed
+  # with a certificate, the rule becomes the bundle identifier and that
+  # certificate, which do not change between builds.
+  #
+  # It buys nothing from Gatekeeper: a certificate nobody trusts is still
+  # "unidentified developer", still one "Open Anyway" per download. For that,
+  # and for notarisation, there is no substitute for a Developer ID.
+  echo "Signing with ${HOPDESK_SIGN_IDENTITY} (self-signed: permissions survive updates, Gatekeeper still asks)."
+  extra+=(--config.mac.identity=null)
+  selfsigned="${HOPDESK_SIGN_IDENTITY}"
 else
   # Not "unsigned": Apple Silicon refuses to run a bundle with no valid
   # signature at all ("damaged"), so it is signed ad hoc — valid, but vouched
@@ -86,11 +105,17 @@ if [[ -z "$KOFFI_NODE" ]]; then
 fi
 echo "koffi: $KOFFI_NODE"
 
-# 2. Ad hoc signature, with the same entitlements a Developer ID build gets.
-if $adhoc; then
-  codesign --force --deep --sign - --options runtime \
+# 2. Our own signature, with the same entitlements a Developer ID build gets.
+#    Deepest first: every nested binary is signed before the bundle around it.
+if $adhoc || [[ -n "$selfsigned" ]]; then
+  codesign --force --deep --sign "${selfsigned:--}" --options runtime \
     --entitlements packaging/entitlements.mac.plist "$APP"
   codesign --verify --deep --strict --verbose=2 "$APP"
+  if [[ -n "$selfsigned" ]]; then
+    # What macOS will recognise this app by from now on. Printed because if it
+    # ever changes, that is the day permissions start being asked for again.
+    codesign --display --requirements - "$APP" 2>&1 | sed 's/^/  /'
+  fi
 fi
 
 # 3. The .dmg, from the app as it now is.

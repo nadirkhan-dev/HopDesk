@@ -78,6 +78,15 @@ jobs:
     runs-on: macos-14
     # A hung app must not hold a runner for hours.
     timeout-minutes: 30
+    env:
+      # A certificate of our own, so that macOS recognises each build as the
+      # same app and keeps the permissions granted to the last one. Absent from
+      # a fork, or before it is set up, and then the build signs itself ad hoc
+      # exactly as before.
+      MACOS_CERT_P12: ${{ secrets.MACOS_CERT_P12 }}
+      MACOS_CERT_PASSWORD: ${{ secrets.MACOS_CERT_PASSWORD }}
+      KEYCHAIN_PASSWORD: ${{ secrets.KEYCHAIN_PASSWORD }}
+      SIGN_IDENTITY: HopDesk Self Signed
     strategy:
       fail-fast: true
       matrix:
@@ -95,11 +104,32 @@ jobs:
           arch -x86_64 /usr/bin/true 2>/dev/null \
             || sudo softwareupdate --install-rosetta --agree-to-license
 
+      # A keychain of this run's own: the certificate never touches the
+      # runner's login keychain, and goes away with the runner.
+      - name: Take the signing certificate into a keychain
+        if: env.MACOS_CERT_P12 != ''
+        run: |
+          set -euo pipefail
+          KEYCHAIN="$RUNNER_TEMP/hopdesk-signing.keychain-db"
+          security create-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN"
+          security set-keychain-settings -lut 21600 "$KEYCHAIN"
+          security unlock-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN"
+          printf '%s' "$MACOS_CERT_P12" | base64 --decode > "$RUNNER_TEMP/cert.p12"
+          security import "$RUNNER_TEMP/cert.p12" -k "$KEYCHAIN" -P "$MACOS_CERT_PASSWORD" \
+            -T /usr/bin/codesign -T /usr/bin/security
+          rm -f "$RUNNER_TEMP/cert.p12"
+          # Without this, codesign stops to ask for the key and the build hangs.
+          security set-key-partition-list -S apple-tool:,apple:,codesign: \
+            -s -k "$KEYCHAIN_PASSWORD" "$KEYCHAIN" >/dev/null
+          security list-keychain -d user -s "$KEYCHAIN" login.keychain-db
+          security find-identity -v -p codesigning "$KEYCHAIN" | grep -F "$SIGN_IDENTITY"
+
       - name: Build the .dmg
         env:
           HOPDESK_MAC_ARCH: ${{ matrix.arch }}
-          # No certificate here: signed ad hoc, never with a stray keychain identity.
+          # electron-builder must not go looking: the identity is chosen here.
           CSC_IDENTITY_AUTO_DISCOVERY: "false"
+          HOPDESK_SIGN_IDENTITY: ${{ env.MACOS_CERT_P12 != '' && env.SIGN_IDENTITY || '' }}
         run: bash packaging/build-macos.sh
 
       - name: Check the bundle's architecture and signature
@@ -121,9 +151,17 @@ jobs:
           KOFFI=$(find "$APP/Contents/Resources" -name koffi.node -path "*darwin_${{ matrix.arch }}*" | head -1)
           test -n "$KOFFI" || { echo "koffi's darwin-${{ matrix.arch }} module is not in the bundle" >&2; exit 1; }
           lipo -archs "$KOFFI" | tee /dev/stderr | grep -qw "$want"
-          # A valid signature, ad hoc: without one Apple Silicon calls the app damaged.
+          # A valid signature: without one Apple Silicon calls the app damaged.
           codesign --verify --deep --strict --verbose=2 "$APP"
-          codesign -dv "$APP" 2>&1 | tee /dev/stderr | grep -q "Signature=adhoc"
+          if [ -n "$MACOS_CERT_P12" ]; then
+            # Signed by our certificate, and - the point of the exercise - the
+            # rule macOS will recognise it by names the certificate rather than
+            # this build's hash, so an update keeps its permissions.
+            codesign -dvvv "$APP" 2>&1 | tee /dev/stderr | grep -q "Authority=$SIGN_IDENTITY"
+            codesign --display --requirements - "$APP" 2>&1 | tee /dev/stderr | grep -q 'certificate leaf'
+          else
+            codesign -dv "$APP" 2>&1 | tee /dev/stderr | grep -q "Signature=adhoc"
+          fi
 
       - name: Start the installed app
         run: |
