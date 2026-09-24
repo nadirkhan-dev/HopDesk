@@ -116,8 +116,25 @@ test('a session forced through the relay connects, and the media really goes thr
     await host.waitFor(`return document.querySelector('#mine-state')?.textContent === 'Online'`, 20_000, 'the host online');
     await signIn(host, server.url, true);
     await signIn(viewer, server.url, false);
+
+    /* The viewer is the account's second computer, so it waits until the
+       first one vouches for it - approved here through the interface, the way
+       a person does it, because until then the relay will not have it. */
+    await host.waitFor(`
+      document.querySelector('#mc-refresh').click();
+      return [...document.querySelectorAll('.computer-row')]
+        .some(r => r.querySelector('.sub').textContent.includes('Waiting to be approved'))`,
+      30_000, 'the viewer to appear as waiting');
+    await host.eval(`
+      [...document.querySelectorAll('.computer-row')]
+        .find(r => r.querySelector('.sub').textContent.includes('Waiting to be approved'))
+        .querySelector('.connect-go').click();
+      return true`);
+    await host.waitFor(`return document.querySelector('#dlg-confirm')?.open === true`, 15_000, 'the approve dialog');
+    await host.eval(`document.querySelector('#confirm-ok').click(); return true`);
+
     for (const app of [host, viewer]) {
-      await app.waitFor(`return (await window.hopdesk.accountState()).relay === 'online'`, 25_000, 'the server connection');
+      await app.waitFor(`return (await window.hopdesk.accountState()).relay === 'online'`, 45_000, 'the server connection');
     }
 
     /* The relay credentials the app is handed come from the server and are
