@@ -28,6 +28,7 @@ import {
   type PermissionReport,
 } from './permissions.js';
 import { fingerprint, TrustedDevices } from './trusted.js';
+import { PortalToken } from './portal-token.js';
 import {
   capturedTheWrongScreen, screenChoices, sharedDisplay, sourceForDisplay,
 } from './screens.js';
@@ -90,6 +91,8 @@ const settings = new SettingsStore(dataDir);
 const knownDevices = new KnownDevices(dataDir);
 /** The computers this one lets in without asking; public keys only. */
 const trustedDevices = new TrustedDevices(dataDir);
+/** The Wayland desktop's "again without asking" token, if it ever gave one. */
+const portalToken = new PortalToken(dataDir);
 
 /** Set once the device identity has been loaded, at startup. */
 let localIdentity: LocalIdentity | null = null;
@@ -322,12 +325,31 @@ function prepareInput(): Promise<string | null> {
   if (inputController) return Promise.resolve(null);
   preparingInput ??= (async () => {
     try {
-      inputController = await openInputController();
+      /* On Wayland, the token from the last time someone answered the
+         desktop's dialog. With it the compositor allows the session without
+         asking; without it, it asks - every session, including the ones
+         nobody is sitting at. */
+      const restoreToken = portalToken.get();
+      inputController = await openInputController({
+        ...(restoreToken ? { restoreToken } : {}),
+        onRestoreToken: token => {
+          portalToken.set(token);
+          log.info('the desktop gave HopDesk permission to control it again without asking');
+        },
+      });
       inputUnavailable = null;
-      log.info(`input ready (${process.platform === 'linux' ? linuxBackend() : process.platform})`);
+      log.info(`input ready (${process.platform === 'linux' ? linuxBackend() : process.platform}`
+        + `${restoreToken ? ', without asking' : ''})`);
       return null;
     } catch (err) {
       inputUnavailable = (err as Error).message;
+      /* A token the compositor will not take - revoked, or from a session it
+         has forgotten - makes it ask afresh. Keeping it would mean offering
+         something refused, forever. */
+      if (portalToken.get() && /token|denied|cancel/i.test(inputUnavailable)) {
+        portalToken.clear();
+        log.warn('the desktop refused the saved permission; it will ask again next time');
+      }
       log.warn(`input injection unavailable: ${inputUnavailable}`);
       return inputUnavailable;
     } finally {
@@ -694,7 +716,9 @@ app.whenReady().then(async () => {
   /* The menu bar item, and staying alive without a window. macOS only: on
      Linux the app is started when it is wanted, and a tray icon there would be
      a second way to lose track of what is running. */
-  if (process.platform === 'darwin') {
+  /* A tray icon wherever the desktop has one: it is how a computer that is
+     reachable says so, and how it is quit for real. */
+  if (process.platform === 'darwin' || process.platform === 'linux') {
     background = new BackgroundMode({
       show: showWindow,
       status: () => (host ? host.status() : hostUnavailable()),
@@ -1360,7 +1384,12 @@ handle('trustedList', () => (host ? host.status().trusted : []));
 /* Opening at login is what makes a Mac reachable after a restart without
    anyone opening the app. A user login item: it runs after *this* person logs
    in, so a computer with nobody logged in stays unreachable. */
-handle('loginItem', () => ({ supported: process.platform === 'darwin', openAtLogin: openAtLogin() }));
+/* macOS has a login item; Linux gets a systemd user service that does the same
+   job. Windows would too, but nothing there can host yet. */
+handle('loginItem', () => ({
+  supported: process.platform === 'darwin' || process.platform === 'linux',
+  openAtLogin: openAtLogin(),
+}));
 handle('setLoginItem', (open: boolean) => {
   setOpenAtLogin(Boolean(open));
   const now = openAtLogin();
