@@ -9,7 +9,7 @@ import {
   PROTOCOL_VERSION, type AuthKind, type ChallengeMessage, type ConfirmMessage, type ErrorMessage,
   type HandshakeErrorCode, type HelloMessage,
 } from './messages.js';
-import { AttemptLimiter, type Attempt } from './limiter.js';
+import { AttemptLimiter, PeerThrottle, type Attempt } from './limiter.js';
 import { NonceCache } from './replay.js';
 import type { GrantStore } from './grants.js';
 
@@ -33,7 +33,18 @@ import type { GrantStore } from './grants.js';
 export type LocalErrorCode = 'identity-mismatch' | 'timeout' | 'closed' | 'rejected';
 
 export class HandshakeError extends Error {
-  constructor(readonly code: HandshakeErrorCode | LocalErrorCode, message?: string, readonly retryAfterMs?: number) {
+  /**
+   * @param presentedKey For an identity mismatch: the key the other computer
+   *   actually presented, base64. Carried so the person can be shown both
+   *   fingerprints and decide, rather than meeting a refusal with nothing to
+   *   compare. It proves nothing on its own - it is what is in question.
+   */
+  constructor(
+    readonly code: HandshakeErrorCode | LocalErrorCode,
+    message?: string,
+    readonly retryAfterMs?: number,
+    readonly presentedKey?: string,
+  ) {
     super(message ?? code);
     this.name = 'HandshakeError';
   }
@@ -97,6 +108,7 @@ export interface HostAuthOptions {
   accountAuthorised?: (viewerId: string, viewerKey: Uint8Array) => boolean;
   now?: () => number;
   limiter?: AttemptLimiter;
+  throttle?: PeerThrottle;
   nonces?: NonceCache;
 }
 
@@ -113,6 +125,7 @@ export interface PendingHostHandshake {
 export class HostAuthenticator {
   readonly deviceId: string;
   readonly limiter: AttemptLimiter;
+  readonly throttle: PeerThrottle;
   private readonly nonces: NonceCache;
   private readonly now: () => number;
 
@@ -120,10 +133,16 @@ export class HostAuthenticator {
     this.deviceId = deviceIdFromPublicKey(opts.identity.publicKey);
     this.now = opts.now ?? Date.now;
     this.limiter = opts.limiter ?? new AttemptLimiter(() => opts.rotateAccessCode(), undefined, this.now);
+    this.throttle = opts.throttle ?? new PeerThrottle(undefined, this.now);
     this.nonces = opts.nonces ?? new NonceCache(undefined, undefined, this.now);
   }
 
-  async onHello(hello: HelloMessage): Promise<HelloOutcome> {
+  /**
+   * @param peer Who is asking, for the rate limiter: an address and the Device
+   *   ID claimed. Omitted where the transport cannot say, which puts every
+   *   such caller in one bucket rather than none.
+   */
+  async onHello(hello: HelloMessage, peer?: string): Promise<HelloOutcome> {
     const error = (code: HandshakeErrorCode, retryAfterMs?: number): HelloOutcome =>
       ({ kind: 'error', reply: retryAfterMs === undefined ? { type: 'error', code } : { type: 'error', code, retryAfterMs } });
 
@@ -135,6 +154,17 @@ export class HostAuthenticator {
 
     const fresh = this.nonces.check(hello.nonce, hello.time);
     if (fresh !== 'ok') return error(fresh);
+
+    /* Keyed on both, so one machine claiming to be a hundred devices, and a
+       hundred machines claiming to be one, are each held apart. */
+    const who = `${peer ?? 'unknown'}|${hello.viewerId}`;
+
+    /* Signature-authenticated kinds cannot be guessed at, but they can be
+       churned; see PeerThrottle. Checked before any signature work. */
+    if (hello.auth !== 'code') {
+      const allowed = this.throttle.allow(who);
+      if (!allowed.ok) return error('busy', allowed.retryAfterMs);
+    }
 
     /* Two computers on the same account: no secret to type, so an ephemeral
        exchange signed by both device keys. What authorises it is the account —
@@ -165,7 +195,7 @@ export class HostAuthenticator {
     } else {
       const secret = this.opts.accessCode();
       if (secret === null) return error('code-disabled');
-      const decision = this.limiter.begin();
+      const decision = this.limiter.begin(who);
       if (!decision.ok) return error(decision.reason === 'busy' ? 'busy' : 'rate-limited', decision.retryAfterMs);
       attempt = decision.attempt;
       try {
@@ -372,7 +402,11 @@ export class ViewerHandshake {
       throw new HandshakeError('identity-mismatch', 'The responding device is not the one with this Device ID');
     }
     if (this.opts.expectedHostKey && toBase64(this.opts.expectedHostKey) !== challenge.hostKey) {
-      throw new HandshakeError('identity-mismatch', 'This device\'s identity key changed since the last connection');
+      throw new HandshakeError(
+        'identity-mismatch',
+        'This device\'s identity key changed since the last connection',
+        undefined,
+        challenge.hostKey);
     }
 
     if (this.ephemeral) return this.finishAccount(challenge, hostKey);

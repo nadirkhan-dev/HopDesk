@@ -183,6 +183,12 @@ export interface AcceptOptions {
   /** Called when the answer was 'allow-and-trust', with the viewer to remember. */
   onTrust?: (viewer: { viewerId: string; viewerKey: Uint8Array; viewerName: string }) => void;
   grants: GrantStore;
+  /**
+   * Who is connecting, for the rate limiter — the address a local connection
+   * came from, or the relay and the device behind it. Not shown to anyone and
+   * not trusted for anything: it only decides whose lockout is whose.
+   */
+  peer?: string;
   handshakeTimeoutMs?: number;
   consentTimeoutMs?: number;
   grantTtlMs?: number;
@@ -203,7 +209,7 @@ export async function acceptViewer(link: MessageLink, auth: HostAuthenticator, o
   try {
     const hello = await inbox.next(handshakeTimeout);
     if (hello.type !== 'hello') throw new HandshakeError('protocol', `Expected hello, received ${hello.type}`);
-    const outcome = await auth.onHello(hello);
+    const outcome = await auth.onHello(hello, opts.peer);
     if (outcome.kind === 'error') {
       link.send(outcome.reply);
       throw new HandshakeError(outcome.reply.code, undefined, outcome.reply.retryAfterMs);

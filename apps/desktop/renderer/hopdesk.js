@@ -412,7 +412,25 @@ export function initHopdesk({ api, toast, confirmDialog }) {
     clearInterval(setup.timer);
     setup.timer = null;
     if ($('#dlg-setup').open) $('#dlg-setup').close();
-    void refreshHost();
+    /* The other computer's key is not the one pinned for it: both fingerprints,
+     and a decision. */
+  api.onKeyChangeRequest?.(request => {
+    $('#keychange-who').textContent = request.hostName || request.deviceId;
+    $('#keychange-old').textContent = request.oldFingerprint;
+    $('#keychange-new').textContent = request.newFingerprint;
+    $('#keychange-why').textContent = keyChangeWarning(request);
+    const dialog = $('#dlg-keychange');
+    const answer = accepted => {
+      if (dialog.open) dialog.close();
+      void api.answerKeyChange(request.id, accepted);
+    };
+    $('#keychange-refuse').onclick = () => answer(false);
+    $('#keychange-accept').onclick = () => answer(true);
+    dialog.addEventListener('cancel', e => { e.preventDefault(); answer(false); }, { once: true });
+    if (!dialog.open) dialog.showModal();
+  });
+
+  void refreshHost();
   }
 
   for (const id of ['screen-recording', 'accessibility']) {
@@ -1030,6 +1048,21 @@ export function initHopdesk({ api, toast, confirmDialog }) {
 }
 
 const formatCode = code => (code.length === 6 ? `${code.slice(0, 3)} ${code.slice(3)}` : code);
+
+/**
+ * What a changed identity key means, in the two cases that produce it.
+ *
+ * Said plainly and without deciding for anyone: HopDesk cannot tell a
+ * reinstalled computer from a substituted one, and the person can - they know
+ * whether they reinstalled it. What they must not be told is that it is
+ * probably fine.
+ */
+export function keyChangeWarning({ hostName, deviceId, viaServer } = {}) {
+  const who = hostName || deviceId || 'That computer';
+  return `Accept only if you know why it changed - if ${who} was reinstalled, or HopDesk was `
+    + 'set up on it again. Otherwise this may be a different computer answering in its place'
+    + (viaServer ? ', which is what a compromised server would look like.' : '.');
+}
 
 /**
  * "last seen 3 hours ago", in the words a person would use.

@@ -3,9 +3,20 @@ import {
   connectToHost, HandshakeError, type EndReason, type MessageLink, type ViewerSession,
 } from '@hopdesk/protocol';
 import { connectLan, findHosts, negotiateAsViewer, DEFAULT_LAN_PORT } from '@hopdesk/transport';
-import { normalizeAccessCode, normalizeDeviceId } from '@hopdesk/crypto';
+import { fromBase64, normalizeAccessCode, normalizeDeviceId } from '@hopdesk/crypto';
 import type { LocalIdentity } from './identity.js';
 import type { RtcPeerHandle } from './rtc-bridge.js';
+
+/**
+ * The person accepted a computer's new identity key on a relayed connection.
+ * The link that failed cannot be reused, so whoever asked for it asks again.
+ */
+export class KeyAccepted extends Error {
+  constructor(readonly deviceId: string) {
+    super('The new identity key was accepted; connecting again');
+    this.name = 'KeyAccepted';
+  }
+}
 
 /**
  * This computer as a Viewer: connecting to another HopDesk computer with its
@@ -46,6 +57,15 @@ export interface ViewerDependencies {
   /** Known host keys, so a changed identity is noticed rather than trusted. */
   pinnedKey: (deviceId: string) => Uint8Array | undefined;
   rememberKey: (deviceId: string, key: Uint8Array, name: string, where?: { address?: string; port?: number; paired?: boolean }) => void;
+  /** Replaces the pinned key once the person has accepted the change. */
+  acceptNewKey?: (deviceId: string, key: Uint8Array) => boolean;
+  /**
+   * The computer answered with a different identity key than the one pinned
+   * for it. Returns true when the person chose to accept the new key, which
+   * also replaces the pin. Without this the connection simply fails, which is
+   * safe and unhelpful.
+   */
+  keyChanged?: (info: { deviceId: string; hostName?: string; oldKey: Uint8Array; newKey: Uint8Array }) => Promise<boolean>;
   /** Where this computer answered last time, when discovery finds nothing. */
   lastAddress?: (deviceId: string) => { address: string; port?: number } | undefined;
 }
@@ -111,6 +131,13 @@ export class ViewerRole extends EventEmitter {
         ...(pinned ? { expectedHostKey: pinned } : {}),
       });
     } catch (err) {
+      /* A relayed link is used up by the attempt that failed, so unlike a
+         connection on the network this cannot simply be retried here: the
+         caller asks the server for a new introduction. */
+      if (await this.offerNewKey(target.deviceId, pinned, err, target.name)) {
+        this.setStatus({ state: 'ended', error: undefined });
+        throw new KeyAccepted(target.deviceId);
+      }
       const code = err instanceof HandshakeError ? err.code : 'error';
       this.setStatus({ state: 'ended', error: { code, message: (err as Error).message } });
       throw err;
@@ -151,7 +178,30 @@ export class ViewerRole extends EventEmitter {
     return this.current();
   }
 
-  private async attemptConnect({ deviceId, code, paired = false }: { deviceId: string; code: string; paired?: boolean }) {
+  /**
+   * A refusal because the other computer's identity key is not the pinned one.
+   *
+   * Asks the person, showing both fingerprints, and retries once if they
+   * accept. Once: a second mismatch after accepting is not an innocent
+   * reinstall, and asking again in a loop is how someone gets clicked into
+   * trusting anything.
+   */
+  private async offerNewKey(
+    deviceId: string, pinned: Uint8Array | undefined, err: unknown, hostName?: string,
+  ): Promise<boolean> {
+    if (!(err instanceof HandshakeError) || err.code !== 'identity-mismatch') return false;
+    if (!err.presentedKey || !pinned || !this.deps.keyChanged) return false;
+    const newKey = fromBase64(err.presentedKey);
+    const accepted = await this.deps.keyChanged({ deviceId, hostName, oldKey: pinned, newKey })
+      .catch(() => false);
+    if (!accepted) return false;
+    return this.deps.acceptNewKey?.(deviceId, newKey) ?? false;
+  }
+
+  private async attemptConnect(
+    { deviceId, code, paired = false }: { deviceId: string; code: string; paired?: boolean },
+    retrying = false,
+  ): Promise<void> {
     this.setStatus({ state: 'looking', deviceId, resumable: false, error: undefined, hostName: undefined, sessionId: undefined });
 
     const target = await this.locate(deviceId, this.lastRequest?.address, this.lastRequest?.port);
@@ -174,6 +224,11 @@ export class ViewerRole extends EventEmitter {
         ...(pinned ? { expectedHostKey: pinned } : {}),
       });
     } catch (err) {
+      /* The one refusal worth a question rather than a dead end. Accepting
+         replaces the pin, so the retry is an ordinary connection. */
+      if (!retrying && await this.offerNewKey(deviceId, pinned, err)) {
+        return this.attemptConnect({ deviceId, code, paired }, true);
+      }
       const code2 = err instanceof HandshakeError ? err.code : 'error';
       this.setStatus({ state: 'ended', error: { code: code2, message: (err as Error).message } });
       throw err;
@@ -266,7 +321,7 @@ export class ViewerRole extends EventEmitter {
     const delay = Math.min(8000, 500 * 2 ** (this.attempt - 1));
     this.setStatus({ state: 'reconnecting' });
     this.reconnectTimer = setTimeout(() => {
-      void this.attemptConnect({ deviceId: request.deviceId, code: request.code, paired: request.paired }).catch(err => {
+      void this.attemptConnect({ deviceId: request.deviceId, code: request.code, paired: request.paired }).catch((err: unknown) => {
         this.deps.log.warn(`reconnect failed: ${(err as Error).message}`);
       });
     }, delay);

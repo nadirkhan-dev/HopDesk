@@ -111,15 +111,33 @@ host → viewer   sealed auth-result (after consent)
 * **Session root key** = HKDF(Ke, SHA-256(binding, pA, pB, cA, cB)). Nothing
   is sent under it before both confirmations verify.
 * **Guessing limits** (host): a guess is spent when the challenge is sent, so
-  abandoned handshakes count as failures. At most 3 concurrent code
-  handshakes; after 3 consecutive failures an exponential lockout (2 s doubling,
-  capped at 5 min); after 10 failures the code is replaced.
+  abandoned handshakes count as failures. Lockouts are **per peer** — an
+  address and the Device ID it claims — so one attacker serves its own lockout
+  while other computers still connect: after 3 consecutive failures from that
+  peer, an exponential lockout (2 s doubling, capped at 5 min). The caps are
+  global, because the work is: at most 3 code handshakes in flight at once
+  across every peer (each costs 32 MiB of scrypt), at most 2 from one peer. So
+  is rotation, because the code is: after 10 failures against one code, from
+  one peer or a thousand, it is replaced. Connections that need no code
+  (trusted, account, grant) cannot be guessed at but can be churned, so they
+  meet a loose per-peer throttle (15 attempts per 10 s) instead.
 * **Replay**: the host rejects a repeated hello nonce, and a hello whose
   timestamp is more than 10 minutes from its clock.
-* **Consent**: a code connection waits for Allow/Reject from the person at the
-  host (timeout = reject; the prompt is cancelled if the viewer leaves).
-  Unattended access (a stored scrypt verifier, never the password) is refused
-  unless the host enabled it.
+* **Consent**: a code or account connection waits for Allow/Reject from the
+  person at the host (timeout = reject; the prompt is cancelled if the viewer
+  leaves). There is no stored password verifier and no unattended access: an
+  earlier design kept an scrypt verifier for that, and it was removed because
+  a verifier on disk *is* the credential. What replaced it is public-key
+  pairing — ticking "let this computer connect again without asking" stores
+  the viewer's public key (`apps/desktop/src/trusted.ts`), which is useless to
+  anyone who reads the file. A `paired` connection therefore does not prompt;
+  trust expires after 90 days unless used, and revoking it also ends any
+  session that device has open.
+* **A changed identity key** is a question, not a refusal: the viewer shows the
+  fingerprint it pinned and the one being presented, and accepting replaces the
+  pin (`acceptNewKey`). Refusing ends the connection. Only the person can tell
+  a reinstalled computer from a substituted one, and on a relayed connection a
+  changed key is exactly what a compromised server would produce.
 * **Grants**: an allowed viewer receives, sealed, a random 256-bit grant bound
   to its device key with an expiry, so a dropped connection resumes without a
   second prompt. Grants are in memory, revocable, and wiped on revoke.

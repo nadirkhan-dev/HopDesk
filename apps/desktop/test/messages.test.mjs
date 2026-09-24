@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { cleanMessage, friendlyError, lastSeenText } from '../renderer/hopdesk.js';
+import { cleanMessage, friendlyError, lastSeenText, keyChangeWarning } from '../renderer/hopdesk.js';
 
 /**
  * What a failure looks like to the person in front of it. Two layers of
@@ -63,4 +63,24 @@ test('how long a computer has been away, in words', () => {
   assert.equal(lastSeenText(0), 'never connected');
   // A clock that disagrees must not produce "in 2 hours".
   assert.equal(lastSeenText(Date.now() + 60_000), 'last seen just now');
+});
+
+/**
+ * What a changed identity key is told to the person deciding about it.
+ *
+ * The one thing this must not do is reassure: HopDesk cannot tell a
+ * reinstalled computer from a substituted one, and saying "probably fine"
+ * would be putting words to a guess it has no basis for.
+ */
+test('a changed key says what to check, and never that it is probably fine', () => {
+  const text = keyChangeWarning({ hostName: 'Studio Mac', deviceId: 'HD-5AMD-64XF' });
+  assert.match(text, /Studio Mac/);
+  assert.match(text, /reinstalled/, 'does not name the innocent explanation');
+  assert.match(text, /different computer/, 'does not name the bad explanation');
+  assert.doesNotMatch(text, /probably|likely|safe to/i);
+
+  // Over a server, the bad explanation has a name worth using.
+  assert.match(keyChangeWarning({ deviceId: 'HD-5AMD-64XF', viaServer: true }), /compromised server/);
+  // With nothing to go on it still reads as a sentence about a computer.
+  assert.match(keyChangeWarning(), /^Accept only if you know why it changed/);
 });

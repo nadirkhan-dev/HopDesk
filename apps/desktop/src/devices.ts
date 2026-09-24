@@ -101,6 +101,27 @@ export class KnownDevices {
     void this.persist();
   }
 
+  /**
+   * Replaces the pinned key for a computer, after the person was shown both
+   * fingerprints and said to accept the new one.
+   *
+   * `remember` deliberately never overwrites a key - that is what makes the
+   * pin a pin. This is the one way past it, and it exists because the
+   * alternative was a dead end: a key that changed for an innocent reason left
+   * no way to continue except forgetting the computer entirely, which throws
+   * away the very record that would have caught a real substitution.
+   */
+  acceptNewKey(deviceId: string, key: Uint8Array): boolean {
+    const device = this.devices.get(deviceId);
+    if (!device) return false;
+    // A key that does not hash to this Device ID is not that computer's key.
+    if (deviceIdFromPublicKey(key) !== deviceId) return false;
+    device.key = toBase64(key);
+    device.lastConnected = Date.now();
+    void this.persist();
+    return true;
+  }
+
   forget(deviceId: string): void {
     if (this.devices.delete(deviceId)) void this.persist();
   }

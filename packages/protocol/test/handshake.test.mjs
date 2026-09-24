@@ -454,3 +454,27 @@ test('a computer on the account still has to be allowed, unless the host trusts 
   assert.equal(trusting.state.prompts.length, 0, 'a trusted account connection still prompted');
   silent.v.value.control.close();
 });
+
+/**
+ * A pinned key that no longer matches is refused - and the refusal carries the
+ * key that was presented, so the person can be shown both fingerprints and
+ * decide, instead of meeting a dead end.
+ */
+test('a changed host key is refused, with the new key in hand', async () => {
+  const host = makeHost();
+  const stranger = generateIdentity();
+  // Pinned from an earlier connection: a different computer's key entirely.
+  const { v } = await run(host, { expectedHostKey: stranger.publicKey });
+
+  assert.equal(v.status, 'rejected', 'a key that does not match the pin was accepted');
+  assert.equal(v.reason.code, 'identity-mismatch');
+  assert.equal(v.reason.presentedKey, toBase64(host.identity.publicKey),
+    'the refusal did not carry the key the host actually presented');
+  assert.notEqual(v.reason.presentedKey, toBase64(stranger.publicKey));
+});
+
+test('the pinned key being the real one connects as usual', async () => {
+  const host = makeHost();
+  const { v } = await run(host, { expectedHostKey: host.identity.publicKey });
+  assert.equal(v.status, 'fulfilled', 'the right pinned key was refused');
+});

@@ -745,6 +745,31 @@
   </menu>
 </dialog>
 
+<!--
+  The identity key of a computer connected to before is not the one pinned for
+  it. Refusing outright was safe and a dead end; this shows both fingerprints
+  and lets the person decide, because only they know whether that computer was
+  reinstalled.
+-->
+<dialog id="dlg-keychange" aria-labelledby="keychange-title">
+  <h2 id="keychange-title">This computer's identity key has changed</h2>
+  <p><strong id="keychange-who">A computer</strong> answered with a different key than the one
+    saved for it the first time you connected.</p>
+  <div class="field">
+    <label>Key saved before</label>
+    <output class="mono" id="keychange-old"></output>
+  </div>
+  <div class="field">
+    <label>Key it is presenting now</label>
+    <output class="mono" id="keychange-new"></output>
+  </div>
+  <p class="warn-text" id="keychange-why"></p>
+  <menu>
+    <button class="btn" id="keychange-refuse" autofocus>Refuse</button>
+    <button class="btn danger" id="keychange-accept">Accept the new key</button>
+  </menu>
+</dialog>
+
 <dialog id="dlg-consent" aria-labelledby="consent-title">
   <h2 id="consent-title">Allow this computer to connect?</h2>
   <p><strong id="consent-who">A computer</strong> wants to see and control this computer.</p>

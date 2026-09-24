@@ -152,7 +152,7 @@ export class HostRole extends EventEmitter {
     });
 
     const listener = new LanListener((link, remote) => {
-      void this.acceptLink(link, `${remote.address}`);
+      void this.acceptLink(link, `${remote.address}`, `lan:${remote.address}`);
     });
     try {
       await listener.listen({ port: settings.port });
@@ -242,7 +242,12 @@ export class HostRole extends EventEmitter {
    * both a direct socket on the local network and a session the HopDesk server
    * has relayed, because from here on they are the same thing.
    */
-  async acceptLink(link: MessageLink, origin: string) {
+  /**
+   * @param peer How the rate limiter tells one caller from another: the
+   *   address for a connection on the network, or the relay and the device id
+   *   behind it. `origin` is the sentence for the log; this is the key.
+   */
+  async acceptLink(link: MessageLink, origin: string, peer = origin) {
     const auth = this.authenticator;
     if (!auth) { link.close(); return; }
 
@@ -250,6 +255,7 @@ export class HostRole extends EventEmitter {
     try {
       session = await acceptViewer(link, auth, {
         grants: this.grants,
+        peer,
         authorize: (request, signal) => this.deps.consent(request, signal),
         /* Unattended access is what stands in for someone answering, so it
            covers connections from this account's own computers too. */

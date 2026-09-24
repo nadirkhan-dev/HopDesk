@@ -65,6 +65,10 @@ contextBridge.exposeInMainWorld('hopdesk', {
   knownDevices: () => ipcRenderer.invoke('knownDevices'),
   forgetDevice: deviceId => ipcRenderer.invoke('forgetDevice', deviceId),
   answerConsent: (id, decision) => ipcRenderer.invoke('answerConsent', id, decision),
+  answerKeyChange: (id, accepted) => ipcRenderer.invoke('answerKeyChange', id, accepted),
+  onKeyChangeRequest: handler => {
+    ipcRenderer.on('keyChangeRequest', (_event, payload) => handler(payload));
+  },
   trustedList: () => ipcRenderer.invoke('trustedList'),
   loginItem: () => ipcRenderer.invoke('loginItem'),
   setLoginItem: open => ipcRenderer.invoke('setLoginItem', open),

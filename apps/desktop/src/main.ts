@@ -21,13 +21,13 @@ import { KnownDevices } from './devices.js';
 import { RtcBridge, type RtcPeerHandle } from './rtc-bridge.js';
 import { AccountClient } from './account.js';
 import { HostRole } from './host.js';
-import { ViewerRole } from './viewer.js';
+import { KeyAccepted, ViewerRole } from './viewer.js';
 import { openInputController, linuxBackend, type InputController } from '@hopdesk/platform';
 import {
   clearStaleMacPermissions, createPermissionManager, openPermissionSettings, resetMacPermissions,
   type PermissionReport,
 } from './permissions.js';
-import { TrustedDevices } from './trusted.js';
+import { fingerprint, TrustedDevices } from './trusted.js';
 import {
   capturedTheWrongScreen, screenChoices, sharedDisplay, sourceForDisplay,
 } from './screens.js';
@@ -431,6 +431,42 @@ function askConsent(request: ConsentRequest, signal: AbortSignal): Promise<Conse
   });
 }
 
+/**
+ * Asks whether a computer's new identity key should be accepted.
+ *
+ * Both fingerprints go to the window, because the only person who can tell a
+ * reinstalled computer from a substituted one is the one who knows whether it
+ * was reinstalled. No window, no question: refuse.
+ */
+const keyChangeRequests = new Map<string, (accepted: boolean) => void>();
+function askAboutNewKey(info: {
+  deviceId: string; hostName?: string; oldKey: Uint8Array; newKey: Uint8Array;
+}): Promise<boolean> {
+  if (!window || window.isDestroyed()) return Promise.resolve(false);
+  const id = randomUUID();
+  log.warn(`identity key changed for ${info.deviceId}: was ${fingerprint(info.oldKey)}, now ${fingerprint(info.newKey)}`);
+  return new Promise<boolean>(resolve => {
+    let done = false;
+    const settle = (accepted: boolean) => {
+      if (done) return;
+      done = true;
+      keyChangeRequests.delete(id);
+      log.info(`identity key for ${info.deviceId} ${accepted ? 'accepted by the user' : 'refused'}`);
+      resolve(accepted);
+    };
+    keyChangeRequests.set(id, settle);
+    send('keyChangeRequest', {
+      id,
+      deviceId: info.deviceId,
+      hostName: info.hostName,
+      oldFingerprint: fingerprint(info.oldKey),
+      newFingerprint: fingerprint(info.newKey),
+    });
+    window?.show();
+    window?.focus();
+  });
+}
+
 const send = (channel: string, payload: unknown) => {
   if (window && !window.isDestroyed()) window.webContents.send(channel, payload);
 };
@@ -516,6 +552,8 @@ function createRoles(identity: LocalIdentity) {
     iceServers: () => account?.iceServers() ?? Promise.resolve([]),
     connectionKind: sessionId => rtc.connectionKind(sessionId),
     pinnedKey: deviceId => knownDevices.keyFor(deviceId),
+    keyChanged: info => askAboutNewKey(info),
+    acceptNewKey: (deviceId, key) => knownDevices.acceptNewKey(deviceId, key),
     rememberKey: (deviceId, key, name, where) => knownDevices.remember(deviceId, key, name || deviceId, where),
     lastAddress: deviceId => {
       const device = knownDevices.list().find(d => d.deviceId === deviceId);
@@ -543,7 +581,9 @@ function createRoles(identity: LocalIdentity) {
          last looked would otherwise be refused on its first connection. */
       void accountClient.refreshComputers()
         .catch(err => log.warn(`could not refresh the computer list: ${(err as Error).message}`))
-        .then(() => hostRole.acceptLink(link, `${intro.peer.name} (${intro.peer.deviceId}) via the HopDesk server`));
+        .then(() => hostRole.acceptLink(link,
+          `${intro.peer.name} (${intro.peer.deviceId}) via the HopDesk server`,
+          `relay:${intro.peer.deviceId}`));
     },
     readSettings: () => settings.get().account,
     writeSettings: async patch => { await settings.update({ account: patch }); },
@@ -1298,6 +1338,14 @@ handle('endHostSession', (id: string, reason?: string) => {
   return host ? host.status() : hostUnavailable();
 });
 
+/** Accept or Refuse from the "this computer's key changed" dialog. */
+handle('answerKeyChange', (id: string, accepted: boolean) => {
+  const settle = keyChangeRequests.get(String(id));
+  if (!settle) return { ok: false };
+  settle(accepted === true);
+  return { ok: true };
+});
+
 handle('answerConsent', (id: string, decision: string) => {
   const settle = consentRequests.get(String(id));
   if (!settle) return { ok: false };
@@ -1476,15 +1524,27 @@ handle('connectComputer', async (deviceId: string) => {
   const target = account.state().computers.find(c => c.deviceId === deviceId);
   if (!target) throw new Error('That computer is not on this account');
   if (target.self) throw new Error('That is this computer');
-  const { intro, link } = await account.openSession(String(deviceId));
+
+  const dial = async () => {
+    const { intro, link } = await account!.openSession(String(deviceId));
+    try {
+      return await viewer!.connectAccount(link, {
+        deviceId: intro.peer.deviceId,
+        name: intro.peer.name,
+        ...(intro.peer.publicKey ? { publicKey: fromBase64(intro.peer.publicKey) } : {}),
+      });
+    } catch (err) {
+      link.close(err as Error);
+      throw err;
+    }
+  };
+
   try {
-    return await viewer.connectAccount(link, {
-      deviceId: intro.peer.deviceId,
-      name: intro.peer.name,
-      ...(intro.peer.publicKey ? { publicKey: fromBase64(intro.peer.publicKey) } : {}),
-    });
+    return await dial();
   } catch (err) {
-    link.close(err as Error);
+    /* The key changed, the person looked at both fingerprints and accepted it.
+       The relayed link is spent, so ask the server for another one - once. */
+    if (err instanceof KeyAccepted) return dial();
     throw err;
   }
 });
