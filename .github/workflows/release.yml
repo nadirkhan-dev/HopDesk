@@ -86,7 +86,13 @@ jobs:
       MACOS_CERT_P12: ${{ secrets.MACOS_CERT_P12 }}
       MACOS_CERT_PASSWORD: ${{ secrets.MACOS_CERT_PASSWORD }}
       KEYCHAIN_PASSWORD: ${{ secrets.KEYCHAIN_PASSWORD }}
-      SIGN_IDENTITY: HopDesk Self Signed
+      SIGN_IDENTITY: ${{ secrets.MACOS_SIGN_IDENTITY || 'HopDesk Self Signed' }}
+      # Apple's own certificate, if this repository ever has one. With these
+      # set, build-macos.sh signs with the Developer ID it finds and asks
+      # Apple to notarise, and Gatekeeper stops asking anybody anything.
+      APPLE_ID: ${{ secrets.APPLE_ID }}
+      APPLE_APP_SPECIFIC_PASSWORD: ${{ secrets.APPLE_APP_SPECIFIC_PASSWORD }}
+      APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
     strategy:
       fail-fast: true
       matrix:
@@ -177,6 +183,14 @@ jobs:
             # every build shares, and not by this build's own hash.
             grep -qi "certificate" "$RUNNER_TEMP/requirement.txt"
             ! grep -qi "cdhash" "$RUNNER_TEMP/requirement.txt"
+            # With Apple's own certificate the app is notarised as well, and a
+            # notarised app carries Apple's stapled ticket. Checked only when
+            # notarisation was asked for, so the self-signed build does not
+            # fail for lacking something it never claimed.
+            if [ -n "$APPLE_ID" ] && [ -n "$APPLE_TEAM_ID" ]; then
+              xcrun stapler validate "$APP"
+              spctl --assess --type execute --verbose=2 "$APP"
+            fi
           else
             grep -q "Signature=adhoc" "$RUNNER_TEMP/signature.txt"
           fi
