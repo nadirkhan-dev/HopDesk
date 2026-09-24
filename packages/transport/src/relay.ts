@@ -131,6 +131,11 @@ export class RelayClient {
       }
       if (!wasOnline && reject) {
         this.fail(new RelayError('unreachable', event.reason || 'The server did not accept the connection'), reject);
+        /* Telling the caller it did not work is not the same as giving up.
+           A server that is down for a minute, or a computer waiting to be
+           approved from another one on the account, both become reachable
+           later and nothing will announce it - so keep trying quietly. */
+        if (this.opts.reconnect !== false) this.scheduleRetry();
         return;
       }
       this.scheduleRetry();

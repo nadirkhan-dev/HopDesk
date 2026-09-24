@@ -4,7 +4,7 @@ import { toBase64, fromBase64 } from '@hopdesk/crypto';
 import { HostAuthenticator, GrantStore, acceptViewer, connectToHost } from '@hopdesk/protocol';
 import { RelayClient, negotiateAsHost, negotiateAsViewer } from '@hopdesk/transport';
 import { testServer } from './helpers/server.mjs';
-import { enrolDevice, signIn } from './helpers/device.mjs';
+import { enrolDevice, approveDevice, signIn } from './helpers/device.mjs';
 
 /**
  * The client half of the relay, against the real server: two devices connect,
@@ -185,3 +185,39 @@ async function waitFor(condition, what, timeoutMs = 5000) {
   }
   throw new Error(`timed out waiting for ${what}`);
 }
+
+/**
+ * A computer waiting to be approved keeps trying, and gets in the moment it
+ * is let in.
+ *
+ * Nothing tells a waiting computer that somebody pressed Approve, so if it
+ * gave up on the first refusal it would sit there until it was restarted -
+ * which, for a computer meant to be reachable, is exactly the wrong answer.
+ */
+test('a computer waiting for approval reconnects itself once approved', async () => {
+  const server = await testServer();
+  try {
+    const account = await signIn(server);
+    const approver = await enrolDevice(server, account, 'Studio Mac');
+    const waiting = await enrolDevice(server, account, 'Office Linux', { approve: false });
+
+    const states = [];
+    const client = new RelayClient({
+      url: server.ws, token: waiting.deviceToken,
+      onIncoming: () => {},
+      onState: (state, detail) => states.push([state, detail]),
+    });
+
+    // The first attempt is refused, and says what it is waiting for.
+    await assert.rejects(client.connect(), /waiting to be approved/i);
+    assert.ok(states.some(([state, detail]) => state === 'offline' && /waiting to be approved/i.test(detail ?? '')),
+      `the reason never reached the interface: ${JSON.stringify(states)}`);
+
+    // Somebody at the approved computer says yes...
+    await approveDevice(server, approver.deviceToken, waiting.deviceId);
+
+    // ...and the waiting computer finds its own way in, without being restarted.
+    await waitFor(() => client.connected, 'the approved computer to connect by itself', 15_000);
+    client.close();
+  } finally { await server.close(); }
+});

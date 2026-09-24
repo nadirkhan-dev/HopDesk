@@ -138,7 +138,15 @@ export class AccountClient extends EventEmitter {
 
     await this.enrol(base);
     await this.refreshComputers();
-    await this.connectRelay();
+    /* Signing in worked even when the relay will not have this computer yet.
+       A computer waiting to be approved from another one on the account is
+       refused a socket, and that is not a failure to sign in - it is the
+       state it is meant to be in, and being told so is the whole point.
+       The relay keeps trying by itself and connects the moment it is let in. */
+    await this.connectRelay().catch((err: unknown) => {
+      this.detail = (err as Error).message;
+      this.deps.log.info(`signed in; the relay is not available yet: ${this.detail}`);
+    });
     this.emitChange();
     return this.state();
   }
