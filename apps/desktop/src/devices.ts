@@ -30,6 +30,21 @@ export interface KnownDevice {
   paired?: boolean;
 }
 
+/**
+ * A name that is really an address, which tells nobody which computer it is.
+ *
+ * It happens: a host whose system name is unset, or a connection made by
+ * address before the other end said what it was called. Showing "192.168.1.21"
+ * in a list of computers is worse than showing the Device ID, because an
+ * address belongs to whoever has it this week.
+ */
+export function looksLikeAddress(name: string): boolean {
+  const text = name.trim();
+  if (/^\d{1,3}(\.\d{1,3}){3}(:\d+)?$/.test(text)) return true;        // 192.168.1.21, with or without a port
+  if (/^\[[0-9a-f:]+\](:\d+)?$/i.test(text)) return true;               // [::1]:47631
+  return /^[0-9a-f]{0,4}(:[0-9a-f]{0,4}){2,}$/i.test(text);              // a bare IPv6 address
+}
+
 export class KnownDevices {
   private devices = new Map<string, KnownDevice>();
   private writing: Promise<void> = Promise.resolve();
@@ -83,7 +98,9 @@ export class KnownDevices {
     this.devices.set(deviceId, {
       deviceId,
       key: existing?.key ?? toBase64(key),
-      name: name.slice(0, 64) || deviceId,
+      /* Refreshed every time, so a computer that was saved under an address -
+         or renamed since - is called what it calls itself now. */
+      name: looksLikeAddress(name) ? deviceId : (name.trim().slice(0, 64) || deviceId),
       lastConnected: Date.now(),
       ...(address ? { lastAddress: address } : {}),
       ...(port ? { lastPort: port } : {}),

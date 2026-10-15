@@ -45,12 +45,18 @@ export const METHOD_HINTS = {
 export function mergeComputers({ account = [], known = [], signedIn = false } = {}) {
   const rows = new Map();                       // join key → row
   const keyOf = entry => entry.publicKey || entry.key || `id:${entry.deviceId}`;
+  /* An address is not a name. One can end up saved as a name - a host with no
+     system name of its own, or a connection made by address before the other
+     end said what it was called - and an address in a list of computers tells
+     nobody which computer it is, since it belongs to whoever has it this week.
+     The Device ID at least belongs to the machine. */
+  const named = (name, deviceId) => (!name || isAddress(name) ? deviceId : name);
 
   for (const device of account) {
     if (device.self) continue;                  // the computer you are sitting at
     rows.set(keyOf(device), {
       deviceId: device.deviceId,
-      name: device.name || device.deviceId,
+      name: named(device.name, device.deviceId),
       os: device.os ?? null,
       online: device.online === true,
       lastSeen: device.lastSeen ?? null,
@@ -76,12 +82,15 @@ export function mergeComputers({ account = [], known = [], signedIn = false } = 
       existing.address = device.lastAddress;
       existing.port = device.lastPort;
       existing.lastSeen = existing.lastSeen ?? device.lastConnected ?? null;
-      if (!existing.name || existing.name === existing.deviceId) existing.name = device.name || existing.name;
+      /* Whichever source actually knows what the computer is called. */
+      if (!existing.name || existing.name === existing.deviceId) {
+        existing.name = named(device.name, existing.name);
+      }
       continue;
     }
     rows.set(join, {
       deviceId: device.deviceId,
-      name: device.name || device.deviceId,
+      name: named(device.name, device.deviceId),
       os: null,
       /* Not on the account, so nothing says whether it is reachable. Unknown
          is not offline: it may be sitting on this network right now, and
@@ -133,6 +142,14 @@ export function connectability(row, method) {
     return { ok: false, why: `${row.name} is not online, so the server cannot reach it.` };
   }
   return { ok: true };
+}
+
+/** Whether a "name" is really an address. Kept in step with devices.ts. */
+export function isAddress(name) {
+  const text = String(name ?? '').trim();
+  if (/^\d{1,3}(\.\d{1,3}){3}(:\d+)?$/.test(text)) return true;
+  if (/^\[[0-9a-f:]+\](:\d+)?$/i.test(text)) return true;
+  return /^[0-9a-f]{0,4}(:[0-9a-f]{0,4}){2,}$/i.test(text);
 }
 
 function statusFor(row) {

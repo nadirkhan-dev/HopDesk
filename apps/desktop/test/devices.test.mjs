@@ -4,7 +4,7 @@ import { mkdtemp } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { generateIdentity, toBase64, deviceIdFromPublicKey } from '@hopdesk/crypto';
-import { KnownDevices } from '../dist/devices.js';
+import { KnownDevices, looksLikeAddress } from '../dist/devices.js';
 
 /**
  * The pinned key of every computer connected to before, and the one way past
@@ -64,4 +64,39 @@ test('forgetting a computer drops the pin, so the next connection starts again',
   devices.remember(one.deviceId, one.key, 'Office PC');
   devices.forget(one.deviceId);
   assert.equal(devices.keyFor(one.deviceId), undefined);
+});
+
+/**
+ * A name that is really an address.
+ *
+ * It happens - a host with no system name of its own, or a connection made by
+ * address before the other end said what it was called - and "192.168.1.21" in
+ * a list of computers tells nobody which computer it is, since an address
+ * belongs to whoever has it this week.
+ */
+test('an address is not a name, and is replaced the next time the computer says what it is called', async () => {
+  const devices = await store();
+  const pc = computer();
+
+  // Saved under an address, as an older connection did.
+  devices.remember(pc.deviceId, pc.key, '192.168.1.21');
+  assert.equal(devices.list()[0].name, pc.deviceId, 'an address was kept as the name');
+
+  // The next connection, where the host says what it is called.
+  devices.remember(pc.deviceId, pc.key, 'studio-mac');
+  assert.equal(devices.list()[0].name, 'studio-mac');
+
+  // And a rename on the other machine follows too.
+  devices.remember(pc.deviceId, pc.key, 'studio-mac-2');
+  assert.equal(devices.list()[0].name, 'studio-mac-2');
+});
+
+test('what counts as an address', () => {
+  for (const address of ['192.168.1.21', '10.0.0.5:47631', '[::1]', '[fe80::1]:47631', 'fe80::1', '::1']) {
+    assert.equal(looksLikeAddress(address), true, `${address} should read as an address`);
+  }
+  // Real names, including ones with digits and dashes, must survive.
+  for (const name of ['studio-mac', 'thinkpad-t14-gen3', 'PC-192', 'office.local', 'mac1']) {
+    assert.equal(looksLikeAddress(name), false, `${name} should read as a name`);
+  }
 });
