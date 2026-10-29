@@ -72,7 +72,13 @@ services:
       - --listening-port=3478
       - --min-port=49160
       - --max-port=49200
-      - --external-ip=${HOPDESK_PUBLIC_IP:?set HOPDESK_PUBLIC_IP in .env}
+      # On a cloud VM the public address is not on the machine: the card holds a
+      # private address and the provider maps the public one onto it. coturn has
+      # to be told both, or it advertises a relay address that nothing can
+      # reach - the session appears to connect and then carries nothing. Set
+      # HOPDESK_PRIVATE_IP on Oracle, AWS, GCP and the like; leave it empty on a
+      # VPS whose public address really is on the interface.
+      - --external-ip=${HOPDESK_PUBLIC_IP:?set HOPDESK_PUBLIC_IP in .env}${HOPDESK_PRIVATE_IP:+/${HOPDESK_PRIVATE_IP}}
       # A relay must not become a way into the private network around it.
       - --denied-peer-ip=10.0.0.0-10.255.255.255
       - --denied-peer-ip=172.16.0.0-172.31.255.255

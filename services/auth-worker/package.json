@@ -1,0 +1,23 @@
+{
+  "name": "@hopdesk/auth-worker",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "HopDesk's authorization service, as a Cloudflare Worker",
+  "scripts": {
+    "schema": "wrangler d1 execute hopdesk-admin --file schema.sql --remote",
+    "schema:local": "wrangler d1 execute hopdesk-admin --file schema.sql --local",
+    "dev": "wrangler dev --local",
+    "deploy": "wrangler deploy",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@hopdesk/crypto": "file:../../packages/crypto",
+    "@hopdesk/protocol": "file:../../packages/protocol"
+  },
+  "devDependencies": {
+    "@cloudflare/workers-types": "^4.20250109.0",
+    "typescript": "^5.6.0",
+    "wrangler": "^3.99.0"
+  }
+}

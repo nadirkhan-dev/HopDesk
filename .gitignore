@@ -9,3 +9,8 @@ build/
 coverage/
 .DS_Store
 *.log
+
+# Cloudflare Worker: local secrets and build state. The signing key lives here
+# during development and must never be committed.
+.dev.vars
+.wrangler/

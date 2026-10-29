@@ -1,0 +1,32 @@
+{
+  // The authorization service as a Cloudflare Worker.
+  //
+  // Why this exists beside server/: the Worker answers only the question "may
+  // this installation run?" - registration, verdicts, and the administration
+  // of blocks. The account API and the relay stay on the Node server, because
+  // a relay needs a long-lived socket and a password needs a slow hash, and
+  // neither belongs in a Worker.
+  //
+  // What it buys: HTTPS on *.workers.dev with no domain, a database that
+  // survives restarts, and no machine to keep awake.
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "hopdesk-auth",
+  "main": "src/worker.ts",
+  "compatibility_date": "2026-10-01",
+  // node:crypto's timingSafeEqual and Buffer, which @hopdesk/crypto uses.
+  "compatibility_flags": ["nodejs_compat"],
+  "observability": { "enabled": true },
+
+  "d1_databases": [
+    {
+      "binding": "DB",
+      "database_name": "hopdesk-admin",
+      "database_id": "8bf98049-9f6c-41db-a732-4d09801c4a60"
+    }
+  ]
+
+  // HOPDESK_AUTH_SIGNING_KEY is deliberately NOT here. It is the half that
+  // signs, and a value in this file is a value in the repository. Set it with:
+  //   npx wrangler secret put HOPDESK_AUTH_SIGNING_KEY
+  // which reads it without echoing it and stores it encrypted.
+}
