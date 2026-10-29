@@ -70,6 +70,20 @@ jobs:
             exit 0
           fi
 
+          # Only the tip of main gets released, and only if it is still the
+          # commit CI tested. Anything else is a race with itself: the bump
+          # would be built on a commit that main has already moved past, the
+          # push would be refused as a non-fast-forward, and forcing it would
+          # throw away whatever landed in between. When main has moved on, the
+          # push that moved it has its own CI run and makes its own release.
+          git fetch --quiet origin main
+          REMOTE=$(git rev-parse FETCH_HEAD)
+          if [ "$REMOTE" != "$SHA" ]; then
+            echo "main is now $REMOTE, not the tested $SHA; that push will release itself."
+            echo "release=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
           # The next patch version, from the one in the tree.
           CURRENT=$(node -p "require('./package.json').version")
           VERSION=$(node -e "const [a,b,c]=require('./package.json').version.split('.');console.log(\`\${a}.\${b}.\${Number(c)+1}\`)")
