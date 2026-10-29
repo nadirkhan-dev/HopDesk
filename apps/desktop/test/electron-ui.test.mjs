@@ -76,11 +76,17 @@ test('adding, validating, searching, duplicating and deleting computers', { skip
     await click(app, '#btn-del');
     await app.waitFor(`return document.querySelector('#dlg-confirm').open`, 8000, 'confirm dialog again');
     await click(app, '#confirm-ok');
-    /* Waits on the data and the list separately, because "the list still shows
-       three" and "the delete never happened" are different bugs, and a busy
-       machine running several Electron instances can make the round trip slow
-       without either being true. */
-    await app.waitFor(`return (await window.hopdesk.list()).length === 2`, 15_000, 'the computer to be deleted');
+    /* Three things can go wrong here and they are not the same bug, so they
+       are waited on separately rather than behind one timeout that says only
+       "the computer to be deleted". This test has failed that way on loaded
+       machines and said nothing about which of them it was:
+         - the confirmation never closed, so the click was lost;
+         - it closed but the removal never finished;
+         - the removal finished but the list kept showing it. */
+    await app.waitFor(`return document.querySelector('#dlg-confirm').open === false`, 8000,
+      'the confirmation to close (the click on OK was received)');
+    await app.waitFor(`return (await window.hopdesk.list()).length === 2`, 30_000,
+      'the removal to finish (the confirmation closed, so OK was pressed)');
     await app.waitFor(`return document.querySelectorAll('.item').length === 2`, 5000,
       'the list to stop showing a deleted computer (the delete itself worked)');
     assert.ok(!(await app.eval(`return await window.hopdesk.list()`)).some(c => c.id === win));
