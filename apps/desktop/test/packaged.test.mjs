@@ -60,6 +60,16 @@ test('two packaged HopDesk applications connect to each other and one controls t
       assert.ok(href.includes('app.asar'), `the ${name} is not running from the bundle: ${href}`);
     }
 
+    /* An official build asks the authorization service whether it may host
+       before it listens, so both copies wait for an answer. A build with no
+       service configured reports `disabled` at once and waits for nothing. */
+    for (const [name, app] of [['host', host], ['viewer', viewer]]) {
+      await app.waitFor(
+        `const s = await window.hopdesk.authorizationStatus();
+         return s.state === 'active' || s.state === 'disabled';`,
+        30_000, `the ${name} to be authorized`);
+    }
+
     /* The bundle has to carry the crypto: without it there is no Device ID. */
     await host.eval(`document.querySelector('#mine-toggle').click(); return true`);
     await host.waitFor(`return document.querySelector('#mine-state')?.textContent === 'Online'`, 25_000, 'the packaged host to come online');

@@ -854,10 +854,20 @@ app.whenReady().then(async () => {
         }
       } else if (status.state === 'active' && host && !host.status().listening
         && settings.get().remoteAccess.enabled) {
-        /* Allowed again: a block being lifted should not need a restart, for
-           the same reason being blocked should not need one. */
-        log.info('authorized again; accepting connections');
-        host.start().catch(err => log.warn(`could not resume: ${(err as Error).message}`));
+        /* Allowed: a block being lifted should not need a restart, for the same
+           reason being blocked should not need one - and on a configured build
+           this is also the *first* start, since nothing listens before the
+           first answer. So the way in for the mouse and keyboard is opened
+           here too, which startup would otherwise have done. */
+        log.info('authorized; accepting connections');
+        host.start()
+          .then(async () => {
+            /* Not on Wayland, where it shows the compositor's dialog: putting
+               that in front of somebody who has just logged in would be rude.
+               There it waits for a session, as it always has. */
+            if (process.platform !== 'linux' || linuxBackend() !== 'wayland') await prepareInput();
+          })
+          .catch(err => log.warn(`could not resume: ${(err as Error).message}`));
       }
     };
     void check();
@@ -940,6 +950,9 @@ app.whenReady().then(async () => {
     app.on('browser-window-focus', () => { void refreshPermissions(false).then(permissionsChanged); });
   }
 
+  /* `host.start()` refuses to listen while this installation may not host, so
+     on a build with a service to ask this does nothing until the first answer
+     arrives, and the periodic check starts it then. */
   if (host && settings.get().remoteAccess.enabled) {
     try {
       await host.start();

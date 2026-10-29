@@ -144,6 +144,23 @@ export class HostRole extends EventEmitter {
     if (this.listener) return;
     const settings = this.deps.settings();
     this.detail = undefined;
+
+    /* An installation that may not host does not open the listener at all.
+       Opening it and refusing every arrival is the worst of both: the window
+       says "Accepting", the port is open, and callers are turned away with
+       nothing on screen to explain why - which is exactly what a fresh
+       install did for the second between launching and its first answer.
+       Checked here rather than in each caller because start() has several -
+       launch, the switch, waking from sleep - and they must agree. The
+       periodic check calls this again the moment the answer arrives. */
+    const allowed = this.deps.authorized?.() ?? { ok: true as const };
+    if (!allowed.ok) {
+      this.detail = allowed.detail;
+      this.deps.log.warn(`not accepting connections: ${allowed.detail}`);
+      this.emit('change');
+      return;
+    }
+
     this.code ??= generateAccessCode();
 
     this.authenticator = new HostAuthenticator({

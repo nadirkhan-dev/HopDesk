@@ -292,3 +292,29 @@ test('a host that cannot write its trust list still answers, and says it is not 
   } finally { await host.stop().catch(() => {}); }
   void dataDir;
 });
+
+test('an installation that may not host does not open the listener at all', async () => {
+  /* Found by the first automatic release: the host started listening before
+     its first authorization answer, so a fresh install said "Accepting" and
+     refused every arrival for the second it took to ask. Nobody connecting
+     could see why, and the packaged test - which does exactly that - timed out
+     waiting for a prompt that was never going to come. */
+  let allowed = false;
+  const { host } = await hostWith({
+    authorized: () => (allowed
+      ? { ok: true }
+      : { ok: false, detail: 'HopDesk has not been able to check whether this installation is authorized.' }),
+  });
+  try {
+    // hostWith starts it; while unauthorized that must be a refusal, not a port.
+    assert.equal(host.status().listening, false, 'it listened while it may not host');
+    assert.match(String(host.status().detail), /has not been able to check/);
+    assert.equal(host.status().accessCode, null, 'it showed an access code nobody could use');
+
+    // And when the answer arrives, starting again works.
+    allowed = true;
+    await host.start();
+    assert.equal(host.status().listening, true, 'it would not listen once authorized');
+    assert.match(String(host.status().accessCode), /^\d{6}$/);
+  } finally { await host.stop().catch(() => {}); }
+});
