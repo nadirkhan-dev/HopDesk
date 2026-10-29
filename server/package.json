@@ -8,7 +8,8 @@
   "scripts": {
     "build": "tsc -p .",
     "start": "node dist/index.js",
-    "test": "node --test --test-concurrency=1 test/*.test.mjs"
+    "test": "node --test --test-concurrency=1 test/*.test.mjs",
+    "admin": "node dist/admin-cli.js"
   },
   "dependencies": {
     "@hopdesk/crypto": "*",

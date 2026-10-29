@@ -31,6 +31,17 @@ export interface ServerConfig {
   registrationToken: string | null;
   /** Where the server sits behind a reverse proxy that sets X-Forwarded-For. */
   trustProxy: boolean;
+  /**
+   * Signs the answers this server gives about whether an installation may run.
+   *
+   * Without it the authorization service is off: no installation can register,
+   * and clients are told so plainly rather than being left to guess. With it,
+   * every verdict is signed, so a client cannot be fed "you are allowed" by
+   * something sitting between it and this server.
+   */
+  authSigningKey: Uint8Array | null;
+  /** How long a client may go unverified before it stops hosting. */
+  authGraceMs: number;
   turn: TurnConfig | null;
 }
 
@@ -90,6 +101,23 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): ServerConfig {
   const tokenSecret = Buffer.from(secret, 'utf8');
   if (tokenSecret.length < 32) throw new ConfigError('HOPDESK_TOKEN_SECRET must be at least 32 characters');
 
+  /* The authorization service is opt-in: a server that does not set a signing
+     key simply does not run one, and says so when asked. */
+  const authSecret = env.HOPDESK_AUTH_SIGNING_KEY;
+  let authSigningKey: Uint8Array | null = null;
+  if (authSecret) {
+    const raw = Buffer.from(authSecret, 'base64');
+    if (raw.length < 32) {
+      throw new ConfigError('HOPDESK_AUTH_SIGNING_KEY must be at least 32 bytes of base64. Generate one with:\n'
+        + '  openssl rand -base64 48');
+    }
+    authSigningKey = new Uint8Array(raw.subarray(0, 32));
+  }
+  const graceHours = Number(env.HOPDESK_AUTH_GRACE_HOURS ?? 168);
+  if (!Number.isFinite(graceHours) || graceHours < 0) {
+    throw new ConfigError('HOPDESK_AUTH_GRACE_HOURS must be a number of hours (168 = seven days)');
+  }
+
   const turnSecret = env.HOPDESK_TURN_SECRET;
   const turnUrls = (env.HOPDESK_TURN_URLS ?? '').split(',').map(s => s.trim()).filter(Boolean);
   if (turnSecret && !turnUrls.length) throw new ConfigError('HOPDESK_TURN_SECRET was set without HOPDESK_TURN_URLS');
@@ -108,6 +136,8 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): ServerConfig {
     registration: registrationMode(env),
     registrationToken: env.HOPDESK_REGISTRATION_TOKEN?.trim() || null,
     trustProxy: boolean(env.HOPDESK_TRUST_PROXY, false),
+    authSigningKey,
+    authGraceMs: Math.round(graceHours * 3600_000),
     turn: turnSecret && turnUrls.length
       ? {
         secret: turnSecret,

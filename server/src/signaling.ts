@@ -26,6 +26,19 @@ const IDLE_TIMEOUT_MS = 120_000;
 const MAX_SESSIONS_PER_DEVICE = 4;
 /** Frames one connection may send per second before it is disconnected. */
 const MAX_FRAMES_PER_SECOND = 400;
+/**
+ * How often every connected device is checked against the register of blocks.
+ *
+ * A credential is checked when a socket is opened and never again, which is
+ * fine for a credential that only stops being good when its owner is removed -
+ * and not fine for one that an administrator can withdraw while the socket is
+ * held open. The administrative HTTP route closes the socket itself, but the
+ * command line cannot: it runs in another process and has no access to this
+ * one's sockets, and it is the interface the documentation recommends. So the
+ * server looks for itself, and a block takes effect within this interval
+ * however it was applied.
+ */
+const REVOCATION_SWEEP_MS = 30_000;
 
 const deviceId = str({ max: 12, pattern: /^HD-[0-9A-HJKMNP-TV-Z]{4}-[0-9A-HJKMNP-TV-Z]{4}$/ });
 
@@ -43,6 +56,8 @@ export interface SignalingDependencies {
   presence: Presence;
   log: (message: string) => void;
   now?: () => number;
+  /** Shortened in tests, which cannot wait half a minute. */
+  revocationSweepMs?: number;
 }
 
 export class SignalingServer {
@@ -50,10 +65,38 @@ export class SignalingServer {
   private readonly now: () => number;
   /** Set by close(), so a socket closing during shutdown writes nothing. */
   private stopping = false;
+  private readonly sweep: NodeJS.Timeout;
 
   constructor(private readonly deps: SignalingDependencies) {
     this.now = deps.now ?? Date.now;
     this.wss = new WebSocketServer({ noServer: true, maxPayload: MAX_MESSAGE_BYTES });
+    this.sweep = setInterval(() => this.dropBlocked(), deps.revocationSweepMs ?? REVOCATION_SWEEP_MS);
+    this.sweep.unref?.();
+  }
+
+  /**
+   * Closes the sockets of devices that have been blocked since they connected.
+   *
+   * The session they are carrying ends with the socket, which is as far as
+   * this server's reach goes: media that has already found its way through the
+   * relay is between the two computers and coturn, and stops when the clients
+   * tear it down or when their relay credentials expire.
+   */
+  dropBlocked(): void {
+    if (this.stopping) return;
+    for (const connection of [...this.deps.presence.all()]) {
+      let blocked = false;
+      try {
+        blocked = this.deps.api.isBlocked(connection.deviceId);
+      } catch {
+        /* A database that cannot be read is not a reason to disconnect
+           everybody; the next sweep tries again. */
+        continue;
+      }
+      if (!blocked) continue;
+      this.deps.log(`device ${connection.deviceId} has been blocked; closing its connection`);
+      connection.close(4006, 'This HopDesk installation has been disabled.');
+    }
   }
 
   /** Called from the HTTP server's upgrade event for /ws. */
@@ -102,6 +145,16 @@ export class SignalingServer {
 
       if (message.type === 'auth') {
         if (connection) { ws.close(4002, 'already authenticated'); return; }
+        /* A blocked installation is refused here with words a person can act
+           on, rather than the bare "unauthorised" that a wrong token gets.
+           The credential is already dead by this point - authenticateToken
+           refuses it - so this only decides what the person is told. */
+        const blocked = this.deps.api.blockedDeviceFor?.(message.token);
+        if (blocked) {
+          this.deps.log(`device ${blocked} is blocked; refusing the relay`);
+          ws.close(4006, 'This HopDesk installation has been disabled.');
+          return;
+        }
         const caller = this.deps.api.authenticateToken(message.token);
         if (!caller?.deviceId) {
           // A token that is not tied to a device cannot be a session endpoint.
@@ -140,6 +193,14 @@ export class SignalingServer {
           return;
 
         case 'connect': {
+          /* Checked again here, and not only when the socket was opened: a
+             block applied in between must not be able to start one more
+             session while the sweep is still to come. */
+          if (this.deps.api.isBlocked(connection.deviceId)) {
+            this.deps.log(`device ${connection.deviceId} is blocked; refusing to introduce it`);
+            connection.close(4006, 'This HopDesk installation has been disabled.');
+            return;
+          }
           const target = this.deps.store.deviceById(message.target);
           /* Both devices must be on the same account. This is the only
              authorisation this server performs, and it is also checked again by
@@ -153,7 +214,10 @@ export class SignalingServer {
             return;
           }
           const peer = this.deps.presence.get(message.target);
-          if (!peer) {
+          /* A blocked computer is not reachable, and is reported the way an
+             unreachable one is: what was done to it is its owner's business
+             and the administrator's, not the caller's. */
+          if (!peer || this.deps.api.isBlocked(message.target)) {
             send({ type: 'connect-failed', target: message.target, reason: 'offline' });
             return;
           }
@@ -219,6 +283,7 @@ export class SignalingServer {
 
   close() {
     this.stopping = true;
+    clearInterval(this.sweep);
     for (const client of this.wss.clients) client.close(1001, 'server stopping');
     this.wss.close();
   }

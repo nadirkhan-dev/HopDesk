@@ -118,15 +118,23 @@ export class RelayClient {
       for (const [, pending] of this.pendingConnects) pending.reject(new RelayError('offline', 'The connection to the server was lost'));
       this.pendingConnects.clear();
 
-      /* 4001 and 4003 mean this device's credentials are no longer good —
-         reconnecting would only repeat the refusal. 4005 is different: the
-         computer is waiting to be approved from another one on the account,
-         and when that happens nothing tells it - so it keeps trying, and the
-         reason it was given is what the window shows meanwhile. */
-      const permanent = event.code === 4001 || event.code === 4003;
-      this.setState('offline', permanent ? (event.reason || 'this computer is no longer enrolled') : event.reason);
+      /* 4001, 4003 and 4006 mean this device's credentials are no longer good —
+         reconnecting would only repeat the refusal. 4006 is the administrator
+         having disabled this installation: retrying it every few seconds would
+         make every blocked copy of HopDesk into a small flood against the
+         server that blocked it, and would tell the person nothing new. 4005 is
+         different: the computer is waiting to be approved from another one on
+         the account, and when that happens nothing tells it - so it keeps
+         trying, and the reason it was given is what the window shows
+         meanwhile. */
+      const disabled = event.code === 4006;
+      const permanent = event.code === 4001 || event.code === 4003 || disabled;
+      const finalWords = disabled
+        ? (event.reason || 'this HopDesk installation has been disabled')
+        : (event.reason || 'this computer is no longer enrolled');
+      this.setState('offline', permanent ? finalWords : event.reason);
       if (permanent) {
-        this.fail(new RelayError('unauthorised', event.reason || 'This computer is no longer enrolled'), reject);
+        this.fail(new RelayError('unauthorised', finalWords), reject);
         return;
       }
       if (!wasOnline && reject) {

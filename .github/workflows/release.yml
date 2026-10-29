@@ -51,6 +51,17 @@ jobs:
             libxtst6 libnss3 libasound2t64 libgtk-3-0t64 libfuse2t64 \
             tigervnc-standalone-server
 
+      - name: Point this build at the authorization service
+        env:
+          HOPDESK_AUTH_URL: ${{ secrets.HOPDESK_AUTH_URL }}
+          HOPDESK_AUTH_PUBLIC_KEY: ${{ secrets.HOPDESK_AUTH_PUBLIC_KEY }}
+        # Writes the service and its public key into the source before it is
+        # compiled. With neither secret set it prints that the build asks
+        # nobody and changes nothing, which is what a build from source does -
+        # so this step is safe before the secrets exist, and the packages it
+        # produces simply carry no check.
+        run: node apps/desktop/scripts/write-build-config.mjs
+
       - name: Build the AppImage and the .deb
         run: bash packaging/build-appimage.sh
 
@@ -139,6 +150,17 @@ jobs:
           sudo security add-trusted-cert -d -r trustRoot -p codeSign \
             -k /Library/Keychains/System.keychain "$RUNNER_TEMP/signer.pem"
           security find-identity -v -p codesigning "$KEYCHAIN" | grep -F "$SIGN_IDENTITY"
+
+      - name: Point this build at the authorization service
+        env:
+          HOPDESK_AUTH_URL: ${{ secrets.HOPDESK_AUTH_URL }}
+          HOPDESK_AUTH_PUBLIC_KEY: ${{ secrets.HOPDESK_AUTH_PUBLIC_KEY }}
+        # Writes the service and its public key into the source before it is
+        # compiled. With neither secret set it prints that the build asks
+        # nobody and changes nothing, which is what a build from source does -
+        # so this step is safe before the secrets exist, and the packages it
+        # produces simply carry no check.
+        run: node apps/desktop/scripts/write-build-config.mjs
 
       - name: Build the .dmg
         env:

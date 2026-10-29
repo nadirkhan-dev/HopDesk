@@ -133,6 +133,28 @@ host → viewer   sealed auth-result (after consent)
   anyone who reads the file. A `paired` connection therefore does not prompt;
   trust expires after 90 days unless used, and revoking it also ends any
   session that device has open.
+* **Disabling an installation** (`apps/desktop/src/authorization.ts`,
+  `server/src/api.ts`): a build made with an authorization service registers
+  its identity key, is given a credential that can be taken away, and asks
+  every six hours whether it may still host. Every answer is signed by the
+  service and checked against a public key compiled into the build, so
+  redirecting the address achieves nothing — an unsigned answer is no answer.
+  The check sits in `HostRole.acceptLink`, above all four auth kinds, so
+  rotating an access code or adding a trusted computer cannot route around it.
+  Not having asked counts as no (`mayHostWith`), so a build that was made with
+  a service cannot host on the strength of the check not having run yet.
+  **What it enforces:** new connections through the server stop at once on any
+  version, because the server refuses; a connection already open is closed by
+  the server's revocation sweep within half a minute, whether the block came
+  from the HTTP route or from `hopdesk-admin`; local-network connections stop
+  on builds that carry the check, within the grace window
+  (`HOPDESK_AUTH_GRACE_HOURS`, seven days by default, and never more than
+  thirty days whatever the server answers). **What it does not:** versions
+  released before it existed, builds with the check removed — the source is
+  public — a computer kept offline or with its clock moved back until its
+  window expires, and media already flowing through coturn, which a modified
+  client could hold until its relay credentials run out. A build with no
+  service configured asks nobody and behaves exactly as HopDesk always has.
 * **A changed identity key** is a question, not a refusal: the viewer shows the
   fingerprint it pinned and the one being presented, and accepting replaces the
   pin (`acceptNewKey`). Refusing ends the connection. Only the person can tell

@@ -20,6 +20,8 @@ export interface RunningServer {
   store: Store;
   presence: Presence;
   api: Api;
+  /** Exposed so a test can make the sweep happen rather than wait for it. */
+  signaling: SignalingServer;
   close(): Promise<void>;
 }
 
@@ -29,6 +31,8 @@ export interface StartOptions {
   databaseFile?: string;
   log?: (message: string) => void;
   now?: () => number;
+  /** How often connected devices are checked against the register of blocks. */
+  revocationSweepMs?: number;
 }
 
 export async function startServer(opts: StartOptions): Promise<RunningServer> {
@@ -36,9 +40,17 @@ export async function startServer(opts: StartOptions): Promise<RunningServer> {
   const store = new Store(opts.config.dataDir, opts.databaseFile);
   const presence = new Presence(opts.now);
   const api = new Api({ config: opts.config, store, presence, log, ...(opts.now ? { now: opts.now } : {}) });
-  const signaling = new SignalingServer({ store, api, presence, log, ...(opts.now ? { now: opts.now } : {}) });
+  const signaling = new SignalingServer({
+    store, api, presence, log,
+    ...(opts.now ? { now: opts.now } : {}),
+    ...(opts.revocationSweepMs ? { revocationSweepMs: opts.revocationSweepMs } : {}),
+  });
 
   store.pruneRefresh(Date.now());
+  /* Two years of what was done to which computer, and no more: a record kept
+     for ever is a record of everybody who ever connected anything. */
+  const forgotten = store.pruneEvents(Date.now() - 2 * 365 * 24 * 3600_000);
+  if (forgotten) log(`forgot ${forgotten} event(s) older than two years`);
 
   const http: Server = createServer((req, res) => {
     void api.handle(req, res);
@@ -68,6 +80,7 @@ export async function startServer(opts: StartOptions): Promise<RunningServer> {
     store,
     presence,
     api,
+    signaling,
     async close() {
       signaling.close();
       await new Promise<void>(resolve => http.close(() => resolve()));

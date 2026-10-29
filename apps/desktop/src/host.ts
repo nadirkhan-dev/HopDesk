@@ -59,6 +59,15 @@ export interface HostDependencies {
   settings: () => RemoteAccessSettings;
   /** Asks the person at this computer. Must not resolve 'allow' by itself. */
   consent: (request: ConsentRequest, signal: AbortSignal) => Promise<ConsentDecision>;
+  /**
+   * Whether this installation is allowed to host at all, and why not.
+   *
+   * Checked here rather than in each way in, because every way in - a code, a
+   * trusted computer, a reconnect grant, an account - arrives through
+   * acceptLink. Rotating a code or adding a trusted computer therefore cannot
+   * route around it, since both are consulted further down.
+   */
+  authorized?: () => { ok: true } | { ok: false; detail: string };
   /** The computers this one trusts to connect without asking. */
   trusted: () => TrustedDevices;
   /** Creates the hidden renderer that captures the screen and holds the peer connection. */
@@ -250,6 +259,17 @@ export class HostRole extends EventEmitter {
   async acceptLink(link: MessageLink, origin: string, peer = origin) {
     const auth = this.authenticator;
     if (!auth) { link.close(); return; }
+
+    /* One gate for every way in. A refusal is told to the other end in words
+       rather than by a silent hang-up, so the person there knows it is this
+       computer that is disabled and not their own connection. */
+    const allowed = this.deps.authorized?.() ?? { ok: true as const };
+    if (!allowed.ok) {
+      this.deps.log.warn(`connection from ${origin} refused: ${allowed.detail}`);
+      try { link.send({ type: 'error', code: 'host-disabled' }); } catch { /* already gone */ }
+      link.close();
+      return;
+    }
 
     let session: HostSession;
     try {

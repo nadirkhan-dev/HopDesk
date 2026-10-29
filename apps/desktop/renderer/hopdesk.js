@@ -597,6 +597,59 @@ export function initHopdesk({ api, toast, confirmDialog }) {
     if (!dialog.open) dialog.showModal();
   });
 
+  /**
+   * Whether this installation is allowed to run.
+   *
+   * Said in the banner above everything, because it explains why this computer
+   * will not accept connections and nothing else in the window would. The two
+   * cases are deliberately worded differently: being disabled is a decision
+   * somebody made, while being unable to check is a network problem, and
+   * telling a person the first when it is the second would be a lie.
+   */
+  const showAuthorization = status => {
+    const banner = $('#banner');
+    if (!status || status.state === 'active' || status.state === 'disabled') {
+      if (banner.dataset.kind === 'authorization') { banner.hidden = true; delete banner.dataset.kind; }
+      return;
+    }
+    banner.dataset.kind = 'authorization';
+    banner.className = status.state === 'blocked' ? 'banner error' : 'banner';
+    banner.textContent = status.state === 'blocked'
+      ? `This HopDesk installation has been disabled, and will not accept or make `
+        + `HopDesk connections.${status.reason ? ` Reason: ${status.reason}` : ''}`
+      : 'HopDesk cannot reach the service that authorizes this installation, so it is not accepting '
+        + 'connections. Connecting out from this computer still works.';
+    banner.hidden = false;
+  };
+  /**
+   * A newer HopDesk, offered rather than applied.
+   *
+   * It says the version and opens the page; installing is the person's own
+   * step, because a .deb needs root and a .dmg needs dragging, and HopDesk
+   * asks for neither.
+   */
+  const showUpdate = update => {
+    if (!update?.version) return;
+    const banner = $('#banner');
+    if (banner.dataset.kind === 'authorization') return;   // a block matters more
+    banner.dataset.kind = 'update';
+    banner.className = 'banner';
+    banner.replaceChildren();
+    const text = document.createElement('span');
+    text.textContent = `HopDesk ${update.version} is available. `;
+    const open = document.createElement('button');
+    open.className = 'btn ghost small';
+    open.textContent = 'See what is new';
+    open.onclick = () => { void api.openUpdatePage?.(); };
+    banner.append(text, open);
+    banner.hidden = false;
+  };
+  api.onUpdateAvailable?.(showUpdate);
+  void api.updateStatus?.().then(status => showUpdate(status?.update)).catch(() => {});
+
+  api.onAuthorizationStatus?.(showAuthorization);
+  void api.authorizationStatus?.().then(showAuthorization).catch(() => {});
+
   void refreshHost();
   }
 
