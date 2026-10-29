@@ -1,0 +1,121 @@
+# A release for every push to main, without anybody remembering to tag one.
+#
+# It hangs off CI rather than repeating it. "Build, lint and tests pass first"
+# is not a second, weaker set of checks written here - it is the same five jobs
+# that already run on every push, and this does nothing until they are green.
+#
+# What it publishes is a **pre-release**. HopDesk's own update checker ignores
+# anything that is not a plain `major.minor.patch` (see `isNewer`), so a build
+# made this way reaches nobody until it is promoted by hand. That is the point:
+# something to try, not something installed on everyone's machine because a
+# commit was pushed.
+
+name: Release on push
+
+on:
+  workflow_run:
+    workflows: ["CI"]
+    types: [completed]
+    branches: [main]
+
+permissions:
+  contents: write
+
+jobs:
+  bump:
+    name: Decide and tag
+    # Only a push to main that passed. A failed CI run, a pull request, or a
+    # run on another branch is not a release.
+    if: >-
+      github.event.workflow_run.conclusion == 'success'
+      && github.event.workflow_run.event == 'push'
+    runs-on: ubuntu-24.04
+    outputs:
+      release: ${{ steps.decide.outputs.release }}
+      tag: ${{ steps.decide.outputs.tag }}
+      version: ${{ steps.decide.outputs.version }}
+      sha: ${{ steps.push.outputs.sha }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # The commit CI tested, not whatever main has moved on to.
+          ref: ${{ github.event.workflow_run.head_sha }}
+          fetch-depth: 0
+
+      - name: Is this a release at all?
+        id: decide
+        env:
+          GH_TOKEN: ${{ github.token }}
+          SHA: ${{ github.event.workflow_run.head_sha }}
+        run: |
+          set -euo pipefail
+
+          # The version bump this workflow makes must not cause another one.
+          # Its commit says so, and pushes made with GITHUB_TOKEN do not start
+          # workflows anyway - this is the belt to that braces.
+          MESSAGE=$(git log -1 --pretty=%s "$SHA")
+          if printf '%s' "$MESSAGE" | grep -qiF '[skip ci]'; then
+            echo "Skipped by its own commit message: $MESSAGE"
+            echo "release=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          # Documentation is not a reason to build installers. paths-ignore
+          # cannot be used on workflow_run, so the files are read here.
+          CHANGED=$(gh api "repos/${GITHUB_REPOSITORY}/commits/${SHA}" --jq '.files[].filename')
+          echo "Changed files:"; printf '  %s\n' $CHANGED
+          if [ -n "$CHANGED" ] && ! printf '%s\n' $CHANGED | grep -qvE '(^docs/|\.md$)'; then
+            echo "Only documentation changed; no release."
+            echo "release=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          # The next patch version, from the one in the tree.
+          CURRENT=$(node -p "require('./package.json').version")
+          VERSION=$(node -e "const [a,b,c]=require('./package.json').version.split('.');console.log(\`\${a}.\${b}.\${Number(c)+1}\`)")
+          echo "Releasing $CURRENT -> $VERSION"
+          echo "release=true" >> "$GITHUB_OUTPUT"
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          echo "tag=v$VERSION" >> "$GITHUB_OUTPUT"
+
+      - name: Bump, commit and tag
+        id: push
+        if: steps.decide.outputs.release == 'true'
+        env:
+          VERSION: ${{ steps.decide.outputs.version }}
+          TAG: ${{ steps.decide.outputs.tag }}
+        run: |
+          set -euo pipefail
+          # The identity on the commit is this repository's owner, as every
+          # other commit here is.
+          git config user.name "nadirkhan-dev"
+          git config user.email "nklangah555@gmail.com"
+
+          node -e '
+            const { readFileSync, writeFileSync } = require("node:fs");
+            for (const file of ["package.json", "apps/desktop/package.json"]) {
+              const text = readFileSync(file, "utf8");
+              writeFileSync(file, text.replace(/"version": "[^"]+"/, `"version": "${process.env.VERSION}"`));
+            }
+          '
+          git add package.json apps/desktop/package.json
+          git commit -m "Version $VERSION [skip ci]"
+          git tag "$TAG"
+          git push origin "HEAD:main"
+          git push origin "$TAG"
+          echo "sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+
+  build:
+    name: Build and publish
+    needs: bump
+    if: needs.bump.outputs.release == 'true'
+    # The same workflow a tag push uses. Not a copy of it: a copy would be a
+    # second definition of "how HopDesk is built", and the one nobody looks at
+    # would be the one that rots.
+    uses: ./.github/workflows/release.yml
+    with:
+      tag: ${{ needs.bump.outputs.tag }}
+      ref: ${{ needs.bump.outputs.sha }}
+      prerelease: true
+      title: ${{ needs.bump.outputs.tag }} (auto)
+    secrets: inherit

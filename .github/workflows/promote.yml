@@ -1,0 +1,53 @@
+# Turning a pre-release into the one people are offered.
+#
+# Every automatic build is published as a pre-release, which HopDesk's update
+# checker passes over. This is the deliberate act that makes one of them the
+# version other people get: it is a button, pressed by a person who has
+# installed that build and seen it work.
+
+name: Promote to latest
+
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "The pre-release to promote, e.g. v0.2.9"
+        required: true
+        type: string
+
+permissions:
+  contents: write
+
+jobs:
+  promote:
+    name: Promote ${{ inputs.tag }}
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Promote the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          TAG: ${{ inputs.tag }}
+        run: |
+          set -euo pipefail
+
+          # Refuse early rather than half-promote something that is not there.
+          if ! gh release view "$TAG" >/dev/null 2>&1; then
+            echo "::error::There is no release tagged $TAG."
+            exit 1
+          fi
+
+          # The packages must actually be on it. A release whose build failed
+          # has notes and no installers, and promoting that would offer
+          # everybody an update they cannot download.
+          ASSETS=$(gh release view "$TAG" --json assets --jq '[.assets[].name] | join(" ")')
+          echo "Assets: ${ASSETS:-none}"
+          for WANTED in .deb .AppImage .dmg SHA256SUMS.txt; do
+            case "$ASSETS" in
+              *"$WANTED"*) ;;
+              *) echo "::error::$TAG has no $WANTED; refusing to promote it."; exit 1 ;;
+            esac
+          done
+
+          gh release edit "$TAG" --prerelease=false --latest
+          echo "::notice::$TAG is now the latest release. HopDesk will offer it from the next check."

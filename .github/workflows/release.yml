@@ -27,6 +27,30 @@ on:
         required: false
         type: boolean
         default: true
+  # Called by auto-release.yml after a push to main has passed CI. One build
+  # definition, two ways in: a release made by hand from a tag, and one made
+  # automatically, must be the same packages built the same way, or the
+  # automatic one is a second implementation nobody checks.
+  workflow_call:
+    inputs:
+      tag:
+        description: "Tag to publish, created by the caller"
+        required: true
+        type: string
+      ref:
+        description: "Commit to build - the caller's version bump, not the push that caused it"
+        required: true
+        type: string
+      prerelease:
+        description: "Publish as a pre-release, for trying before anybody else gets it"
+        required: false
+        type: boolean
+        default: false
+      title:
+        description: "Release title; defaults to HopDesk <tag>"
+        required: false
+        type: string
+        default: ""
 
 permissions:
   contents: write
@@ -37,6 +61,9 @@ jobs:
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
+        with:
+          # Empty for a tag push, so checkout does what it always did.
+          ref: ${{ inputs.ref }}
       - uses: actions/setup-node@v4
         with:
           node-version: 24
@@ -124,6 +151,9 @@ jobs:
         arch: [arm64, x64]
     steps:
       - uses: actions/checkout@v4
+        with:
+          # Empty for a tag push, so checkout does what it always did.
+          ref: ${{ inputs.ref }}
       - uses: actions/setup-node@v4
         with:
           node-version: 24
@@ -257,7 +287,10 @@ jobs:
     name: Publish the release
     needs: [linux, macos]
     # success(): a custom condition otherwise replaces "only if every build passed".
-    if: success() && (github.event_name == 'push' || inputs.publish)
+    # A called run always publishes: the caller only calls when it means to.
+    if: >-
+      success() && (github.event_name == 'push' || github.event_name == 'workflow_call'
+      || inputs.publish)
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/download-artifact@v4
@@ -276,6 +309,11 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           GH_REPO: ${{ github.repository }}
           TAG: ${{ inputs.tag || github.ref_name }}
+          # Set only by the automatic path, which publishes something to try
+          # rather than something to install.
+          TITLE: ${{ inputs.title }}
+          PRERELEASE: ${{ inputs.prerelease }}
+          RELEASE_SHA: ${{ inputs.ref }}
           HOPDESK_AUTH_REQUIRED: ${{ vars.HOPDESK_ENFORCE_AUTHORIZATION }}
         run: |
           set -euo pipefail
@@ -366,14 +404,21 @@ jobs:
           fi
 
           FILES=(packages/*.AppImage packages/*.deb packages/*.dmg packages/SHA256SUMS.txt)
+          # A pre-release is marked as one so the update checker passes over it:
+          # `isNewer` ignores anything not stable, which is what makes an
+          # automatic build safe to publish without reaching anybody.
+          FLAGS=()
+          [ "${PRERELEASE:-false}" = "true" ] && FLAGS+=(--prerelease)
+
           if gh release view "$TAG" >/dev/null 2>&1; then
             echo "Release $TAG exists; replacing its files."
             gh release upload "$TAG" "${FILES[@]}" --clobber
           else
             gh release create "$TAG" \
-              --target "$GITHUB_SHA" \
-              --title "HopDesk $TAG" \
+              --target "${RELEASE_SHA:-$GITHUB_SHA}" \
+              --title "${TITLE:-HopDesk $TAG}" \
               --notes-file /tmp/notes.md \
+              "${FLAGS[@]}" \
               "${FILES[@]}"
           fi
           echo "Download page: ${{ github.server_url }}/${{ github.repository }}/releases/tag/$TAG"
