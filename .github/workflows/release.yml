@@ -51,8 +51,33 @@ jobs:
             libxtst6 libnss3 libasound2t64 libgtk-3-0t64 libfuse2t64 \
             tigervnc-standalone-server
 
+      - name: Point this build at the authorization service
+        env:
+          HOPDESK_AUTH_URL: ${{ secrets.HOPDESK_AUTH_URL }}
+          HOPDESK_AUTH_PUBLIC_KEY: ${{ secrets.HOPDESK_AUTH_PUBLIC_KEY }}
+          # Set the repository variable HOPDESK_ENFORCE_AUTHORIZATION to 1 once
+          # the service is running. From then on a build that cannot check -
+          # a missing secret, a renamed declaration - fails here instead of
+          # going out looking like one that can.
+          HOPDESK_AUTH_REQUIRED: ${{ vars.HOPDESK_ENFORCE_AUTHORIZATION }}
+        run: node apps/desktop/scripts/write-build-config.mjs
+
+
       - name: Build the AppImage and the .deb
         run: bash packaging/build-appimage.sh
+
+      - name: Check what the packages carry
+        env:
+          HOPDESK_AUTH_REQUIRED: ${{ vars.HOPDESK_ENFORCE_AUTHORIZATION }}
+        # Asked of the packaged application rather than of the build log,
+        # because the mistake worth catching is a configuration step that ran
+        # and was then undone by something later.
+        run: |
+          if [ -n "${HOPDESK_AUTH_REQUIRED:-}" ]; then
+            node apps/desktop/scripts/check-build-config.mjs
+          else
+            node apps/desktop/scripts/check-build-config.mjs --expect-none
+          fi
 
       - name: Start the packaged app and connect two of them
         run: |
@@ -140,6 +165,18 @@ jobs:
             -k /Library/Keychains/System.keychain "$RUNNER_TEMP/signer.pem"
           security find-identity -v -p codesigning "$KEYCHAIN" | grep -F "$SIGN_IDENTITY"
 
+      - name: Point this build at the authorization service
+        env:
+          HOPDESK_AUTH_URL: ${{ secrets.HOPDESK_AUTH_URL }}
+          HOPDESK_AUTH_PUBLIC_KEY: ${{ secrets.HOPDESK_AUTH_PUBLIC_KEY }}
+          # Set the repository variable HOPDESK_ENFORCE_AUTHORIZATION to 1 once
+          # the service is running. From then on a build that cannot check -
+          # a missing secret, a renamed declaration - fails here instead of
+          # going out looking like one that can.
+          HOPDESK_AUTH_REQUIRED: ${{ vars.HOPDESK_ENFORCE_AUTHORIZATION }}
+        run: node apps/desktop/scripts/write-build-config.mjs
+
+
       - name: Build the .dmg
         env:
           HOPDESK_MAC_ARCH: ${{ matrix.arch }}
@@ -147,6 +184,16 @@ jobs:
           CSC_IDENTITY_AUTO_DISCOVERY: "false"
           HOPDESK_SIGN_IDENTITY: ${{ env.MACOS_CERT_P12 != '' && env.SIGN_IDENTITY || '' }}
         run: bash packaging/build-macos.sh
+
+      - name: Check what the bundle carries
+        env:
+          HOPDESK_AUTH_REQUIRED: ${{ vars.HOPDESK_ENFORCE_AUTHORIZATION }}
+        run: |
+          if [ -n "${HOPDESK_AUTH_REQUIRED:-}" ]; then
+            node apps/desktop/scripts/check-build-config.mjs
+          else
+            node apps/desktop/scripts/check-build-config.mjs --expect-none
+          fi
 
       - name: Check the bundle's architecture and signature
         run: |
@@ -229,6 +276,7 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           GH_REPO: ${{ github.repository }}
           TAG: ${{ inputs.tag || github.ref_name }}
+          HOPDESK_AUTH_REQUIRED: ${{ vars.HOPDESK_ENFORCE_AUTHORIZATION }}
         run: |
           set -euo pipefail
           cat > /tmp/notes.md <<'NOTES'
@@ -292,6 +340,30 @@ jobs:
             session to host, or host from the other machine.
           - **No Windows package.** There is no Host backend for Windows.
           NOTES
+
+          # Said in the release rather than left to be discovered: whether these
+          # packages can be disabled remotely is the kind of thing that must not
+          # be silent either way.
+          if [ -n "${HOPDESK_AUTH_REQUIRED:-}" ]; then
+            cat >> /tmp/notes.md <<'ENFORCED'
+
+          ## Remote administration
+
+          These packages check with HopDesk's authorization service and can be
+          disabled remotely by whoever runs it - including a copy used only on its
+          own network. A disabled copy stops accepting and making HopDesk
+          connections, and says so.
+          ENFORCED
+          else
+            cat >> /tmp/notes.md <<'UNENFORCED'
+
+          ## Remote administration
+
+          These packages carry **no authorization service**. Connections through a
+          HopDesk server can still be refused by that server, but a copy used on a
+          local network cannot be disabled remotely. Nothing is sent anywhere.
+          UNENFORCED
+          fi
 
           FILES=(packages/*.AppImage packages/*.deb packages/*.dmg packages/SHA256SUMS.txt)
           if gh release view "$TAG" >/dev/null 2>&1; then

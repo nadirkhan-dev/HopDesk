@@ -1,7 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import {
-  mergeComputers, methodsFor, defaultMethod, connectability, METHOD_LABELS,
+  mergeComputers, methodsFor, defaultMethod, connectability, isAddress, METHOD_LABELS,
 } from '../renderer/computers.js';
 import { keyFingerprint } from '../renderer/hopdesk.js';
 
@@ -140,4 +140,23 @@ test('a fingerprint is short, grouped, and the same shape everywhere', () => {
   assert.equal(keyFingerprint(key), 'dead beef 0123 4567');
   // Nonsense in, something readable out - never a crash in front of a decision.
   assert.equal(keyFingerprint('not base64 at all!!'), 'unreadable');
+});
+
+test('a row saved under an address shows the Device ID, not the address', () => {
+  /* Until the computer next says what it is called. An address in a list of
+     computers names whoever has it this week, not a machine. */
+  const [row] = mergeComputers({
+    known: [{ deviceId: 'HD-JFKC-PVE7', key: 'KEY-LAN', name: '192.168.1.21', lastConnected: 5 }],
+  });
+  assert.equal(row.name, 'HD-JFKC-PVE7');
+
+  // And the account's name for the same machine wins over a local address.
+  const [joined] = mergeComputers({
+    account: [{ deviceId: 'HD-JFKC-PVE7', name: 'studio-mac', publicKey: 'KEY-LAN', online: true, self: false }],
+    known: [{ deviceId: 'HD-JFKC-PVE7', key: 'KEY-LAN', name: '192.168.1.21', lastConnected: 5 }],
+    signedIn: true,
+  });
+  assert.equal(joined.name, 'studio-mac');
+  assert.equal(isAddress('192.168.1.21'), true);
+  assert.equal(isAddress('thinkpad-t14-gen3'), false);
 });

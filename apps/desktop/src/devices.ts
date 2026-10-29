@@ -30,6 +30,21 @@ export interface KnownDevice {
   paired?: boolean;
 }
 
+/**
+ * A name that is really an address, which tells nobody which computer it is.
+ *
+ * It happens: a host whose system name is unset, or a connection made by
+ * address before the other end said what it was called. Showing "192.168.1.21"
+ * in a list of computers is worse than showing the Device ID, because an
+ * address belongs to whoever has it this week.
+ */
+export function looksLikeAddress(name: string): boolean {
+  const text = name.trim();
+  if (/^\d{1,3}(\.\d{1,3}){3}(:\d+)?$/.test(text)) return true;        // 192.168.1.21, with or without a port
+  if (/^\[[0-9a-f:]+\](:\d+)?$/i.test(text)) return true;               // [::1]:47631
+  return /^[0-9a-f]{0,4}(:[0-9a-f]{0,4}){2,}$/i.test(text);              // a bare IPv6 address
+}
+
 export class KnownDevices {
   private devices = new Map<string, KnownDevice>();
   private writing: Promise<void> = Promise.resolve();
@@ -83,17 +98,38 @@ export class KnownDevices {
     this.devices.set(deviceId, {
       deviceId,
       key: existing?.key ?? toBase64(key),
-      name: name.slice(0, 64) || deviceId,
+      /* Refreshed every time, so a computer that was saved under an address -
+         or renamed since - is called what it calls itself now. */
+      name: looksLikeAddress(name) ? deviceId : (name.trim().slice(0, 64) || deviceId),
       lastConnected: Date.now(),
       ...(address ? { lastAddress: address } : {}),
       ...(port ? { lastPort: port } : {}),
-      // Pairing is remembered until this computer is told otherwise.
-      ...(where?.paired ?? existing?.paired ? { paired: true } : {}),
+      /* Pairing is remembered until this computer is *told* otherwise, and
+         a connection that simply did not grant it is not being told.
+         `paired ?? existing` read the other way round: a session where the
+         host asked again - the access code used on a computer already paired,
+         or a connection over an account, where trust is not offered because
+         the account is the vouching - reported `paired: false` and erased a
+         pairing that was still good. The effect was the complaint this fixes:
+         one click became "type the code again", for no reason the person
+         could see. Only `setPaired(id, false)` takes it away now, and the only
+         thing that calls it is the host saying it no longer knows this
+         computer. */
+      ...(where?.paired || existing?.paired ? { paired: true } : {}),
     });
     void this.persist();
   }
 
-  /** The host said it will not ask again — or it did ask, so it will. */
+  /**
+   * Records that a host will not ask again, or that it no longer knows this
+   * computer.
+   *
+   * The second is the one that matters: a host forgets a trusted computer when
+   * the person revokes it, and after ninety days unused. Once it has, a
+   * `paired` connection is refused with `not-paired`, and this computer has to
+   * stop offering one click and ask for a code again - which is the honest
+   * answer, not a failure.
+   */
   setPaired(deviceId: string, paired: boolean): void {
     const device = this.devices.get(deviceId);
     if (!device || Boolean(device.paired) === paired) return;

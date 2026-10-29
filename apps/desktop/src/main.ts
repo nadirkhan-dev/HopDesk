@@ -29,6 +29,12 @@ import {
 } from './permissions.js';
 import { fingerprint, TrustedDevices } from './trusted.js';
 import { PortalToken } from './portal-token.js';
+import { Authorization, CHECK_INTERVAL_MS, installationIdFor, mayHostWith } from './authorization.js';
+import {
+  assetFor, feedUrl, isNewer, offerableUrl, readGithubReleases, UPDATE_CHECK_INTERVAL_MS,
+  type AvailableUpdate,
+} from './updates.js';
+import { AUTH_SERVICE_URL, AUTH_SERVICE_PUBLIC_KEY } from './build-config.js';
 import {
   capturedTheWrongScreen, screenChoices, sharedDisplay, sourceForDisplay,
 } from './screens.js';
@@ -63,6 +69,19 @@ const HOST_URL = pathToFileURL(HOST_FILE).href;
 // Every renderer is sandboxed, including any created later by mistake.
 app.enableSandbox();
 
+/* The name the operating system knows this application by, said once and the
+   same in every way of starting it.
+ *
+ * It is not cosmetic. On Linux, `safeStorage` - which encrypts the identity
+ * key - takes its own key from the Secret Service under an item named after
+ * the application, and on macOS from a Keychain item named the same way. A
+ * packaged HopDesk is `HopDesk` (electron-builder's productName); started
+ * from a checkout it would otherwise be the package's own name, ask the
+ * keyring for a different item, get a different key, and fail to decrypt the
+ * identity the installed copy wrote - which looks to a person exactly like
+ * their identity being gone. */
+app.setName('HopDesk');
+
 /* Chromium's display backend is chosen before this script runs, so it cannot be
    set here: see apps/desktop/scripts/launch-args.mjs, which every launcher
    (dev, packaged, tests) uses to pass --ozone-platform. */
@@ -93,6 +112,80 @@ const knownDevices = new KnownDevices(dataDir);
 const trustedDevices = new TrustedDevices(dataDir);
 /** The Wayland desktop's "again without asking" token, if it ever gave one. */
 const portalToken = new PortalToken(dataDir);
+
+/**
+ * Whether this installation is allowed to run, if this build asks anybody.
+ *
+ * Created once the identity is loaded, since the installation is identified by
+ * the key it already has. Null in a build with no service configured, which is
+ * what a build from source is.
+ */
+let authorization: Authorization | null = null;
+let authorizationTimer: NodeJS.Timeout | null = null;
+
+/**
+ * A newer HopDesk, when there is one.
+ *
+ * Only ever *offered*: the file is fetched and checked, and installing it is
+ * the person's own last step, because a .deb needs root and a .dmg needs
+ * dragging, and HopDesk asks for neither.
+ */
+let availableUpdate: AvailableUpdate | null = null;
+
+/**
+ * Whether this build has an authorization service to ask.
+ *
+ * Read once, here, because it decides whether *not* having checked is allowed
+ * to mean "carry on": in a build with a service compiled in, it is not. A key
+ * that cannot be read is the same as a build that cannot check, and is treated
+ * that way rather than crashing the application or waving the check through.
+ */
+const serviceKey = (() => {
+  if (!AUTH_SERVICE_URL || !AUTH_SERVICE_PUBLIC_KEY) return null;
+  try {
+    return fromBase64(AUTH_SERVICE_PUBLIC_KEY);
+  } catch {
+    return null;
+  }
+})();
+const AUTHORIZATION_CONFIGURED = Boolean(AUTH_SERVICE_URL && AUTH_SERVICE_PUBLIC_KEY);
+
+/**
+ * Where this build looks for newer ones.
+ *
+ * An override is useful for testing against a feed of one's own, and is a way
+ * in if it is taken on trust: whatever the feed says ends up in front of the
+ * person as a version to install, and its link ends up in `openExternal`. So
+ * the address is held to https, and the link that comes back is checked again
+ * before anything is opened.
+ */
+const UPDATE_FEED = feedUrl(process.env.HOPDESK_UPDATE_FEED)
+  ?? 'https://api.github.com/repos/nadirkhan-dev/HopDesk/releases';
+
+async function checkForUpdate(): Promise<AvailableUpdate | null> {
+  try {
+    const response = await fetch(UPDATE_FEED, {
+      headers: { accept: 'application/vnd.github+json' },
+      signal: AbortSignal.timeout(15_000),
+    });
+    if (!response.ok) throw new Error(`the release feed answered ${response.status}`);
+    const releases = readGithubReleases(await response.json());
+    const newer = releases.find(release => isNewer(release.version, app.getVersion()));
+    if (!newer) {
+      log.info(`no newer release than ${app.getVersion()}`);
+      availableUpdate = null;
+      return null;
+    }
+    availableUpdate = { ...newer, asset: assetFor(newer.assets, process.platform, process.arch) };
+    log.info(`HopDesk ${newer.version} is available (this is ${app.getVersion()})`);
+    send('updateAvailable', availableUpdate);
+    return availableUpdate;
+  } catch (err) {
+    // An unreachable feed is ordinary; it is not news and not an error to show.
+    log.info(`could not check for updates: ${(err as Error).message}`);
+    return null;
+  }
+}
 
 /** Set once the device identity has been loaded, at startup. */
 let localIdentity: LocalIdentity | null = null;
@@ -510,6 +603,9 @@ function createRoles(identity: LocalIdentity) {
     log,
     settings: () => settings.get().remoteAccess,
     consent: askConsent,
+    /* One gate for every way in - code, trusted computer, reconnect grant,
+       account - because all of them arrive through acceptLink. */
+    authorized: () => mayHostWith(AUTHORIZATION_CONFIGURED, authorization?.status() ?? null),
     createPeer: async (sessionId, iceServers) => {
       const win = await ensureHostWindow();
       const peer = rtc.attach(sessionId, win.webContents, iceServers, icePolicy());
@@ -577,6 +673,14 @@ function createRoles(identity: LocalIdentity) {
     keyChanged: info => askAboutNewKey(info),
     acceptNewKey: (deviceId, key) => knownDevices.acceptNewKey(deviceId, key),
     rememberKey: (deviceId, key, name, where) => knownDevices.remember(deviceId, key, name || deviceId, where),
+    /* Said once, by the only thing that knows: the host itself, refusing a
+       `paired` connection because it no longer has this computer on its list. */
+    forgetPairing: deviceId => {
+      knownDevices.setPaired(deviceId, false);
+      log.info(`${deviceId} no longer lets this computer in without asking; it will ask for a code again`);
+      /* The list redraws itself: the session ends immediately after this, and
+         the window reloads the computers whenever one does. */
+    },
     lastAddress: deviceId => {
       const device = knownDevices.list().find(d => d.deviceId === deviceId);
       return device?.lastAddress ? { address: device.lastAddress, ...(device.lastPort ? { port: device.lastPort } : {}) } : undefined;
@@ -706,6 +810,64 @@ app.whenReady().then(async () => {
     // VNC and RDP still work, so the app starts and says what is missing.
     log.error(`device identity unavailable: ${(err as Error).message}`);
   }
+
+  /* Asked on launch and every six hours - never per connection, so a check
+     can neither interrupt a session nor be the reason one is slow to start. */
+  if (localIdentity && AUTHORIZATION_CONFIGURED) {
+    authorization = new Authorization({
+      dataDir,
+      identity: localIdentity.identity,
+      installationId: installationIdFor(localIdentity.identity),
+      storage: identityStorage(dataDir),
+      serviceUrl: AUTH_SERVICE_URL,
+      servicePublicKey: serviceKey!,
+      appVersion: app.getVersion(),
+      os: process.platform === 'darwin' ? 'macos' : process.platform === 'win32' ? 'windows' : process.platform,
+      log,
+    });
+    const check = async () => {
+      const status = await authorization!.check();
+      send('authorizationStatus', status);
+      /* Blocked while connected: the sessions this computer is hosting end.
+         Over the relay the server has already cut it; this is the half that
+         reaches a session on the local network, which no server can see. */
+      if (status.state === 'blocked' || status.state === 'unverified') {
+        if (host?.status().listening) {
+          log.warn(`no longer accepting connections: ${status.detail}`);
+          /* Stopping the listener ends the sessions it is carrying, which is
+             what reaches a session on the local network. */
+          host.stop('revoked').catch(() => {});
+          permissionsChanged();
+        }
+      } else if (status.state === 'active' && host && !host.status().listening
+        && settings.get().remoteAccess.enabled) {
+        /* Allowed again: a block being lifted should not need a restart, for
+           the same reason being blocked should not need one. */
+        log.info('authorized again; accepting connections');
+        host.start().catch(err => log.warn(`could not resume: ${(err as Error).message}`));
+      }
+    };
+    void check();
+    /* Overridable only to make the effect of a block observable in a test:
+       six hours is the right interval for a real computer and an impossible
+       one to watch. It cannot be used to escape a block - a longer interval
+       means the answer in hand goes stale, and a stale answer stops hosting
+       rather than permitting it. */
+    const every = Number(process.env.HOPDESK_AUTH_CHECK_INTERVAL_MS);
+    const interval = Number.isFinite(every) && every >= 1000 ? every : CHECK_INTERVAL_MS;
+    authorizationTimer = setInterval(() => { void check(); }, interval);
+    authorizationTimer.unref?.();
+  }
+
+  /* Looked for on launch and every six hours, and never while this computer
+     is hosting someone's screen - a session is not a thing to interrupt with
+     an offer to restart. */
+  const updateCheck = () => {
+    if (host?.status().sessions.length) return;
+    void checkForUpdate();
+  };
+  setTimeout(updateCheck, 10_000).unref?.();
+  setInterval(updateCheck, UPDATE_CHECK_INTERVAL_MS).unref?.();
 
   createWindow();
   app.on('activate', () => {
@@ -1287,6 +1449,24 @@ handle('relaunch', () => {
   return { ok: true };
 });
 
+/* What this installation has been told about whether it may run. */
+/* What is known about a newer version, and where to get it. */
+handle('updateStatus', () => (availableUpdate
+  ? { state: 'available', update: availableUpdate, current: app.getVersion() }
+  : { state: 'current', current: app.getVersion() }));
+handle('openUpdatePage', () => {
+  /* Checked again at the point of use: the address came from the release
+     feed, and `openExternal` hands anything it is given to the desktop,
+     which will happily act on a scheme that is not a web page at all. */
+  const page = offerableUrl(availableUpdate?.pageUrl);
+  if (page) void shell.openExternal(page);
+  else if (availableUpdate?.pageUrl) log.warn(`refusing to open ${availableUpdate.pageUrl}`);
+  return { ok: true };
+});
+
+handle('authorizationStatus', () => authorization?.status()
+  ?? { state: 'disabled', detail: 'This build has no authorization service configured.' });
+
 handle('checkPermissions', () => refreshPermissions(false));
 
 /**
@@ -1478,8 +1658,27 @@ ipcMain.on('viewer:log', (e, text: unknown) => {
 
 /* ---------------------------------------- connecting to another computer */
 
+/**
+ * Refuses to start a HopDesk session from a copy that has been disabled.
+ *
+ * Hosting is refused whenever the check has not come back - "we could not ask"
+ * has to count as no, or an installation would only have to stay offline.
+ * Reaching *out* is refused only on an explicit block: a laptop that has been
+ * off the internet for a week is not a disabled one, and taking its own
+ * computers away from it on a guess would be a worse fault than the one being
+ * guarded against. VNC and RDP are left alone either way - they are other
+ * people's servers, reached with credentials of the person's own.
+ */
+function refuseIfDisabled(): void {
+  if (authorization?.status().state !== 'blocked') return;
+  throw new Error(authorization.status().reason
+    ? `This HopDesk installation has been disabled: ${authorization.status().reason}`
+    : 'This HopDesk installation has been disabled.');
+}
+
 handle('connectDevice', async (request: { deviceId?: string; code?: string; address?: string; port?: number }) => {
   if (!viewer) throw new Error('This computer has no HopDesk identity yet');
+  refuseIfDisabled();
   return viewer.connect({
     deviceId: String(request?.deviceId ?? ''),
     code: String(request?.code ?? ''),
@@ -1567,6 +1766,7 @@ handle('accountRemoveComputer', async (deviceId: string) => {
  */
 handle('connectComputer', async (deviceId: string) => {
   if (!account || !viewer) throw new Error('Not signed in');
+  refuseIfDisabled();
   const target = account.state().computers.find(c => c.deviceId === deviceId);
   if (!target) throw new Error('That computer is not on this account');
   if (target.self) throw new Error('That is this computer');
@@ -1603,6 +1803,7 @@ handle('knownDevices', () => knownDevices.list().map(d => ({
 /* One click on a saved computer: no code, no prompt — it paired with this one. */
 handle('connectSaved', async (deviceId: string) => {
   if (!viewer) throw new Error('This computer has no HopDesk identity yet');
+  refuseIfDisabled();
   const id = String(deviceId);
   const device = knownDevices.list().find(d => d.deviceId === id);
   if (!device?.paired) {

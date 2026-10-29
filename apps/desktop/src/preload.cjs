@@ -68,6 +68,15 @@ contextBridge.exposeInMainWorld('hopdesk', {
   rememberConnectMethod: (deviceId, method) => ipcRenderer.invoke('rememberConnectMethod', deviceId, method),
   answerConsent: (id, decision) => ipcRenderer.invoke('answerConsent', id, decision),
   answerKeyChange: (id, accepted) => ipcRenderer.invoke('answerKeyChange', id, accepted),
+  updateStatus: () => ipcRenderer.invoke('updateStatus'),
+  openUpdatePage: () => ipcRenderer.invoke('openUpdatePage'),
+  onUpdateAvailable: handler => {
+    ipcRenderer.on('updateAvailable', (_event, payload) => handler(payload));
+  },
+  onAuthorizationStatus: handler => {
+    ipcRenderer.on('authorizationStatus', (_event, payload) => handler(payload));
+  },
+  authorizationStatus: () => ipcRenderer.invoke('authorizationStatus'),
   onKeyChangeRequest: handler => {
     ipcRenderer.on('keyChangeRequest', (_event, payload) => handler(payload));
   },

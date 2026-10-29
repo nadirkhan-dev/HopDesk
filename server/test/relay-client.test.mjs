@@ -221,3 +221,37 @@ test('a computer waiting for approval reconnects itself once approved', async ()
     client.close();
   } finally { await server.close(); }
 });
+
+test('a disabled installation stops trying, instead of hammering the server that disabled it', async () => {
+  /* 4006 is not 4005. A computer waiting to be approved has to keep trying,
+     because nothing will tell it when that happens; a computer an
+     administrator has disabled has been told the answer, and retrying every
+     few seconds would turn every blocked copy of HopDesk into a small flood
+     against the one server that can unblock it. */
+  const server = await testServer({
+    HOPDESK_AUTH_SIGNING_KEY: toBase64(new Uint8Array(32).fill(7)),
+  });
+  try {
+    const account = await signIn(server);
+    const device = await enrolDevice(server, account);
+    server.store.blockDevice(device.deviceId, Date.now(), 'licence shared', 'cli');
+
+    const states = [];
+    const client = new RelayClient({
+      url: server.ws, token: device.deviceToken, onIncoming: () => {},
+      onState: (state, detail) => states.push([state, detail]),
+    });
+    await assert.rejects(client.connect(), e => e.code === 'unauthorised');
+
+    const offline = states.filter(([s]) => s === 'offline');
+    assert.ok(offline.length, 'the client never reported being offline');
+    assert.match(String(offline.at(-1)[1]), /disabled/i);
+
+    /* Nothing more after the refusal: no retry was scheduled. Measured by
+       waiting longer than the first backoff and counting the states. */
+    const seen = states.length;
+    await new Promise(resolve => setTimeout(resolve, 1500));
+    assert.equal(states.length, seen, `it kept trying: ${JSON.stringify(states)}`);
+    client.close();
+  } finally { await server.close(); }
+});

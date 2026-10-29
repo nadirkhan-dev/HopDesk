@@ -59,6 +59,15 @@ export interface HostDependencies {
   settings: () => RemoteAccessSettings;
   /** Asks the person at this computer. Must not resolve 'allow' by itself. */
   consent: (request: ConsentRequest, signal: AbortSignal) => Promise<ConsentDecision>;
+  /**
+   * Whether this installation is allowed to host at all, and why not.
+   *
+   * Checked here rather than in each way in, because every way in - a code, a
+   * trusted computer, a reconnect grant, an account - arrives through
+   * acceptLink. Rotating a code or adding a trusted computer therefore cannot
+   * route around it, since both are consulted further down.
+   */
+  authorized?: () => { ok: true } | { ok: false; detail: string };
   /** The computers this one trusts to connect without asking. */
   trusted: () => TrustedDevices;
   /** Creates the hidden renderer that captures the screen and holds the peer connection. */
@@ -251,6 +260,17 @@ export class HostRole extends EventEmitter {
     const auth = this.authenticator;
     if (!auth) { link.close(); return; }
 
+    /* One gate for every way in. A refusal is told to the other end in words
+       rather than by a silent hang-up, so the person there knows it is this
+       computer that is disabled and not their own connection. */
+    const allowed = this.deps.authorized?.() ?? { ok: true as const };
+    if (!allowed.ok) {
+      this.deps.log.warn(`connection from ${origin} refused: ${allowed.detail}`);
+      try { link.send({ type: 'error', code: 'host-disabled' }); } catch { /* already gone */ }
+      link.close();
+      return;
+    }
+
     let session: HostSession;
     try {
       session = await acceptViewer(link, auth, {
@@ -263,9 +283,18 @@ export class HostRole extends EventEmitter {
            once by the person here. `grant` resumes a session already allowed. */
         needsConsent: kind => kind === 'code' || kind === 'account',
         onTrust: viewer => {
-          const device = this.deps.trusted().add(viewer);
-          this.deps.log.info(`trusting ${device.deviceId} (${device.name}); it can now connect without asking`);
-          this.emit('change');
+          try {
+            const device = this.deps.trusted().add(viewer);
+            this.deps.log.info(`trusting ${device.deviceId} (${device.name}); it can now connect without asking`);
+            this.emit('change');
+          } catch (err) {
+            /* Logged here, where there is a log, and raised again so the
+               handshake tells the viewer it is *not* trusted - otherwise it
+               would be told to come back without a code to a list it is not
+               on, and be refused for no reason it could see. */
+            this.deps.log.error(`could not remember ${viewer.viewerId} as trusted: ${(err as Error).message}`);
+            throw err;
+          }
         },
       });
     } catch (err) {

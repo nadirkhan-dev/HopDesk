@@ -114,6 +114,96 @@ So signing in on a new machine is two steps: sign in there, then press
 **Approve** on one you already use. A computer waiting is refused the relay
 entirely until then.
 
+## Disabling an installation
+
+The server can disable a copy of HopDesk: its credential stops working, the
+socket it is holding is closed, and the sessions being relayed through it end.
+Read the limits at the end of this section before relying on it — some of them
+are properties of running software on somebody else's computer, and no amount
+of server will fix them.
+
+Switch the service on by setting `HOPDESK_AUTH_SIGNING_KEY` in `.env`
+(`openssl rand -base64 48`), then make yourself an administrator:
+
+```bash
+docker compose exec server npm run admin -- create-admin you@example.com
+```
+
+That prints a token once. It is stored only as a hash, so keep it; losing it
+means making another administrator, not recovering this one.
+
+What makes that command safe is not a password it asks for — it asks for none.
+It is that running it needs this server's own environment and database, which
+is also why there is no HTTP route that creates administrators.
+
+```bash
+docker compose exec server npm run admin -- list
+docker compose exec server npm run admin -- block HD-XXXX-XXXX "licence shared"
+docker compose exec server npm run admin -- unblock HD-XXXX-XXXX
+docker compose exec server npm run admin -- history HD-XXXX-XXXX
+```
+
+To make a build that asks *this* server, it needs the public half of the
+signing key — the server has the secret half, and a build cannot check a
+signature without the other one:
+
+```bash
+docker compose exec server npm run admin -- service-key
+```
+
+That prints an `hdpk_…` key and the command to build with it. It verifies
+answers and cannot produce them, so it is not a secret. The prefix is checked
+by the build script: both halves are 32 bytes of base64, and refusing anything
+without it is what stops the signing half being pasted into a build and handed
+to every user.
+
+Blocking a person rather than a computer, and the rest of the day-to-day:
+
+```bash
+docker compose exec server npm run admin -- block-account someone@example.com "not paid"
+docker compose exec server npm run admin -- unblock-account someone@example.com
+```
+
+[docs/DEPLOYMENT.md](../../docs/DEPLOYMENT.md) is the whole arrangement in one
+place: the key's two halves, the two build secrets, and what to run.
+
+The same things over HTTP, with the token:
+
+```bash
+curl -H "Authorization: Bearer hda_…" https://hopdesk.example.com/api/admin/installations
+curl -X POST -H "Authorization: Bearer hda_…" -H 'content-type: application/json' \
+  -d '{"reason":"licence shared"}' \
+  https://hopdesk.example.com/api/admin/installations/HD-XXXX-XXXX/block
+```
+
+`history` is the life of one computer, newest first: when it joined the
+account and under what name, which computer approved it, when it was removed,
+and every block or unblock with the reason and who did it. Kept for two years
+and then forgotten, because a record of who connected what to what, kept for
+ever, is its own kind of problem.
+
+### What blocking reaches, and what it does not
+
+| | |
+|---|---|
+| New connections through this server (account/relay) | **Stopped at once**, on any version of HopDesk, including ones installed before this existed — the server refuses rather than asking the client to |
+| A connection it is already holding | Closed **within half a minute**: the server checks every connected computer against the register of blocks, so a block takes effect however it was applied. The HTTP route closes it immediately; `hopdesk-admin` runs in another process and cannot, so it waits for that sweep |
+| The relayed session that connection was carrying | Ends when the connection does. A current HopDesk tears the session down when it loses the relay; media that has already found its way through coturn is between the two computers and coturn, so a **modified** client could keep it flowing until its relay credentials expire — `HOPDESK_TURN_TTL_SECONDS`, one hour by default |
+| Connections on a local network, on a build that asks this server | Stopped when that computer next checks — within `HOPDESK_AUTH_GRACE_HOURS`, or within six hours if it is running and online |
+| Connections on a local network, on an **older** build | **Not reachable.** Those versions ask nothing and cannot be told anything. Only installing a build that checks changes that |
+| A build someone made themselves with the check removed | **Not reachable.** HopDesk's source is public |
+| A computer kept offline | Unreachable until its grace window runs out, then it stops hosting. Its clock is its own, so moving it backwards extends that window — the same class of thing as editing the check out, and bounded by a ceiling of thirty days whatever the server said |
+
+A block is per *installation*, identified by its identity key. Wiping
+`~/.local/share/hopdesk` produces a new installation. To stop a person rather
+than a computer, block their account — which, for anything going through this
+server, is decisive:
+
+```bash
+curl -X POST -H "Authorization: Bearer hda_…" \
+  https://hopdesk.example.com/api/admin/accounts/<account-id>/block
+```
+
 ## Looking after it
 
 ```bash

@@ -5,3 +5,4 @@ export * from './replay.js';
 export * from './grants.js';
 export * from './handshake.js';
 export * from './session.js';
+export * from './verdict.js';

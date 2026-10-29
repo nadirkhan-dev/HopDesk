@@ -4,7 +4,7 @@ import path from 'node:path';
 import { startServer, loadConfig } from '../../dist/exports.js';
 
 /** A server on a random port with an in-memory database, as tests use it. */
-export async function testServer(env = {}) {
+export async function testServer(env = {}, opts = {}) {
   const dataDir = await mkdtemp(path.join(tmpdir(), 'hopdesk-server-'));
   const config = loadConfig({
     HOPDESK_TOKEN_SECRET: 'a-test-secret-that-is-long-enough-to-be-accepted',
@@ -15,7 +15,12 @@ export async function testServer(env = {}) {
     ...env,
   });
   const logs = [];
-  const server = await startServer({ config, databaseFile: ':memory:', log: m => logs.push(m) });
+  const server = await startServer({
+    config, databaseFile: ':memory:', log: m => logs.push(m),
+    /* Tests cannot wait half a minute for the sweep that closes the sockets
+       of computers blocked while they were connected. */
+    ...(opts.revocationSweepMs ? { revocationSweepMs: opts.revocationSweepMs } : {}),
+  });
   const base = `http://127.0.0.1:${server.port}`;
   return {
     ...server,

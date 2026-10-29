@@ -57,6 +57,8 @@ export interface ViewerDependencies {
   /** Known host keys, so a changed identity is noticed rather than trusted. */
   pinnedKey: (deviceId: string) => Uint8Array | undefined;
   rememberKey: (deviceId: string, key: Uint8Array, name: string, where?: { address?: string; port?: number; paired?: boolean }) => void;
+  /** Told when a host has stopped letting this computer in without asking. */
+  forgetPairing?: (deviceId: string) => void;
   /** Replaces the pinned key once the person has accepted the change. */
   acceptNewKey?: (deviceId: string, key: Uint8Array) => boolean;
   /**
@@ -228,6 +230,24 @@ export class ViewerRole extends EventEmitter {
          replaces the pin, so the retry is an ordinary connection. */
       if (!retrying && await this.offerNewKey(deviceId, pinned, err)) {
         return this.attemptConnect({ deviceId, code, paired }, true);
+      }
+      /* The host no longer knows this computer: the person there revoked it,
+         or the trust lapsed after ninety days unused. The pairing is dropped
+         here rather than left to fail the same way for ever, so the computer
+         goes back to offering its access code - which is the re-verification
+         this is supposed to require, not a failure to work around. */
+      if (err instanceof HandshakeError && err.code === 'not-paired') {
+        this.deps.forgetPairing?.(deviceId);
+        this.setStatus({
+          state: 'ended',
+          error: {
+            code: 'not-paired',
+            message: 'That computer no longer lets this one connect without asking. '
+              + 'Connect with its access code once, and tick "Let this computer connect again '
+              + 'without asking" when it asks.',
+          },
+        });
+        throw err;
       }
       const code2 = err instanceof HandshakeError ? err.code : 'error';
       this.setStatus({ state: 'ended', error: { code: code2, message: (err as Error).message } });

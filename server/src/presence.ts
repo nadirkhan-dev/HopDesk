@@ -66,6 +66,8 @@ export class Presence {
   }
 
   isOnline(deviceId: string): boolean { return this.online.has(deviceId); }
+  /** Every connected device, for the server's own sweeps. */
+  all(): Connection[] { return [...this.online.values()]; }
   get(deviceId: string): Connection | undefined { return this.online.get(deviceId); }
   get onlineCount() { return this.online.size; }
 

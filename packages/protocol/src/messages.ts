@@ -75,6 +75,12 @@ export const confirmMessage = obj({
 export const HANDSHAKE_ERRORS = [
   'unsupported-version', 'unknown-device', 'rate-limited', 'bad-auth', 'grant-invalid',
   'not-paired', 'code-disabled', 'not-authorised', 'replay', 'clock-skew', 'busy', 'protocol',
+  /* The computer being connected to has been disabled by whoever administers
+     the authorization service its build asks. Sent before anything about the
+     caller is known, so it says nothing about them. A viewer released before
+     this code existed does not recognise it and reports a refusal in general
+     terms, which is the right outcome in the wrong words. */
+  'host-disabled',
 ] as const;
 export type HandshakeErrorCode = typeof HANDSHAKE_ERRORS[number];
 
