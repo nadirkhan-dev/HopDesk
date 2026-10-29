@@ -104,13 +104,32 @@ export class KnownDevices {
       lastConnected: Date.now(),
       ...(address ? { lastAddress: address } : {}),
       ...(port ? { lastPort: port } : {}),
-      // Pairing is remembered until this computer is told otherwise.
-      ...(where?.paired ?? existing?.paired ? { paired: true } : {}),
+      /* Pairing is remembered until this computer is *told* otherwise, and
+         a connection that simply did not grant it is not being told.
+         `paired ?? existing` read the other way round: a session where the
+         host asked again - the access code used on a computer already paired,
+         or a connection over an account, where trust is not offered because
+         the account is the vouching - reported `paired: false` and erased a
+         pairing that was still good. The effect was the complaint this fixes:
+         one click became "type the code again", for no reason the person
+         could see. Only `setPaired(id, false)` takes it away now, and the only
+         thing that calls it is the host saying it no longer knows this
+         computer. */
+      ...(where?.paired || existing?.paired ? { paired: true } : {}),
     });
     void this.persist();
   }
 
-  /** The host said it will not ask again — or it did ask, so it will. */
+  /**
+   * Records that a host will not ask again, or that it no longer knows this
+   * computer.
+   *
+   * The second is the one that matters: a host forgets a trusted computer when
+   * the person revokes it, and after ninety days unused. Once it has, a
+   * `paired` connection is refused with `not-paired`, and this computer has to
+   * stop offering one click and ask for a code again - which is the honest
+   * answer, not a failure.
+   */
   setPaired(deviceId: string, paired: boolean): void {
     const device = this.devices.get(deviceId);
     if (!device || Boolean(device.paired) === paired) return;

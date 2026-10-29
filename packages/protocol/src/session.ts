@@ -261,8 +261,19 @@ export async function acceptViewer(link: MessageLink, auth: HostAuthenticator, o
       throw reject(decision === 'timeout' ? 'timeout' : 'user-rejected');
     }
     if (decision === 'allow-and-trust') {
-      opts.onTrust?.({ viewerId: viewer.viewerId, viewerKey: viewer.viewerKey, viewerName: viewer.viewerName });
-      trusted = true;
+      /* Recording the trust must not be able to take the session down with it.
+         It writes to disk, and a disk can be full or read-only; thrown from
+         here, the exception escaped before the answer below was ever sent and
+         the viewer waited out its consent timeout - a minute of nothing, for a
+         connection the person had just allowed. The session is allowed either
+         way; what fails is only the promise not to ask again, so `trusted`
+         stays false and the next connection asks. */
+      try {
+        opts.onTrust?.({ viewerId: viewer.viewerId, viewerKey: viewer.viewerKey, viewerName: viewer.viewerName });
+        trusted = true;
+      } catch {
+        /* Reported by whoever provided onTrust; it has the log. */
+      }
     }
   }
 

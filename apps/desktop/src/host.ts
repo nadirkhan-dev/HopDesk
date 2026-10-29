@@ -283,9 +283,18 @@ export class HostRole extends EventEmitter {
            once by the person here. `grant` resumes a session already allowed. */
         needsConsent: kind => kind === 'code' || kind === 'account',
         onTrust: viewer => {
-          const device = this.deps.trusted().add(viewer);
-          this.deps.log.info(`trusting ${device.deviceId} (${device.name}); it can now connect without asking`);
-          this.emit('change');
+          try {
+            const device = this.deps.trusted().add(viewer);
+            this.deps.log.info(`trusting ${device.deviceId} (${device.name}); it can now connect without asking`);
+            this.emit('change');
+          } catch (err) {
+            /* Logged here, where there is a log, and raised again so the
+               handshake tells the viewer it is *not* trusted - otherwise it
+               would be told to come back without a code to a list it is not
+               on, and be refused for no reason it could see. */
+            this.deps.log.error(`could not remember ${viewer.viewerId} as trusted: ${(err as Error).message}`);
+            throw err;
+          }
         },
       });
     } catch (err) {

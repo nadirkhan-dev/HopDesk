@@ -69,6 +69,19 @@ const HOST_URL = pathToFileURL(HOST_FILE).href;
 // Every renderer is sandboxed, including any created later by mistake.
 app.enableSandbox();
 
+/* The name the operating system knows this application by, said once and the
+   same in every way of starting it.
+ *
+ * It is not cosmetic. On Linux, `safeStorage` - which encrypts the identity
+ * key - takes its own key from the Secret Service under an item named after
+ * the application, and on macOS from a Keychain item named the same way. A
+ * packaged HopDesk is `HopDesk` (electron-builder's productName); started
+ * from a checkout it would otherwise be the package's own name, ask the
+ * keyring for a different item, get a different key, and fail to decrypt the
+ * identity the installed copy wrote - which looks to a person exactly like
+ * their identity being gone. */
+app.setName('HopDesk');
+
 /* Chromium's display backend is chosen before this script runs, so it cannot be
    set here: see apps/desktop/scripts/launch-args.mjs, which every launcher
    (dev, packaged, tests) uses to pass --ozone-platform. */
@@ -660,6 +673,14 @@ function createRoles(identity: LocalIdentity) {
     keyChanged: info => askAboutNewKey(info),
     acceptNewKey: (deviceId, key) => knownDevices.acceptNewKey(deviceId, key),
     rememberKey: (deviceId, key, name, where) => knownDevices.remember(deviceId, key, name || deviceId, where),
+    /* Said once, by the only thing that knows: the host itself, refusing a
+       `paired` connection because it no longer has this computer on its list. */
+    forgetPairing: deviceId => {
+      knownDevices.setPaired(deviceId, false);
+      log.info(`${deviceId} no longer lets this computer in without asking; it will ask for a code again`);
+      /* The list redraws itself: the session ends immediately after this, and
+         the window reloads the computers whenever one does. */
+    },
     lastAddress: deviceId => {
       const device = knownDevices.list().find(d => d.deviceId === deviceId);
       return device?.lastAddress ? { address: device.lastAddress, ...(device.lastPort ? { port: device.lastPort } : {}) } : undefined;
