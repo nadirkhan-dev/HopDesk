@@ -282,8 +282,12 @@ export default {
       if (request.method === 'GET' && history) {
         const gate = await requireAdmin(request, env, now);
         if (gate.error) return gate.error;
+        /* Newest first, and deterministic on a tie: two things can be done to
+           one installation in the same millisecond, and the row written later
+           is the later event. The Node server orders this the same way. */
         const { results } = await env.DB.prepare(
-          'select id, at, actor, action, subject, reason from admin_events where subject = ? order by at desc')
+          'select id, at, actor, action, subject, reason from admin_events where subject = ?'
+          + ' order by at desc, rowid desc')
           .bind(decodeURIComponent(history[1]!)).all();
         return json({ events: results ?? [] });
       }

@@ -461,7 +461,14 @@ export class Store {
   }
 
   adminEventsFor(subject: string): AdminEvent[] {
-    const rows = this.db.prepare('select * from admin_events where subject = ? order by at desc').all(subject) as Record<string, unknown>[];
+    /* Newest first, and deterministic when two things happen in the same
+       millisecond - which they do: approving a computer and blocking it can
+       land on the same timestamp, and "order by at desc" alone then returns
+       them in whatever order the table gives up. Within a millisecond the row
+       written later is the later event. */
+    const rows = this.db.prepare(
+      'select * from admin_events where subject = ? order by at desc, rowid desc')
+      .all(subject) as Record<string, unknown>[];
     return rows.map(row => ({
       id: String(row.id), at: Number(row.at), actor: String(row.actor),
       action: String(row.action), subject: String(row.subject),
