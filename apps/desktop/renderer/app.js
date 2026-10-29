@@ -12,6 +12,7 @@ import {
   KeyTracker, keysymsForText, framebufferPoint, buttonMask, wheelMask, SPECIAL_COMBOS,
 } from '../dist/keymap.js';
 import { initHopdesk } from './hopdesk.js';
+import { initAdmin } from './admin.js';
 
 /* The mock exists only so the UI can be opened in an ordinary browser during
    development. Inside Electron a missing bridge is a broken install, and
@@ -117,6 +118,10 @@ document.addEventListener('keydown', e => { if (e.key === 'Escape') $('#menu').h
 function showHome(home) {
   $('#home').hidden = !home;
   $('#pane').hidden = home;
+  /* Choosing a computer leaves administration, rather than stacking one view
+     on top of the other. */
+  const admin = $('#admin-view');
+  if (admin) admin.hidden = true;
 }
 
 function renderPane() {
@@ -1207,6 +1212,9 @@ api.onNotice?.(n => {
   /* The HopDesk-native half of the UI: this computer's own Device ID and code,
      connecting to another computer, and the live session. */
   if (api.hostStatus) initHopdesk({ api, toast, confirmDialog });
+  /* Administering the authorization service, for whoever runs one. The button
+     is always there; the page says what to do when no token is held. */
+  initAdmin({ api, toast, confirmDialog });
   // Lets automated tests know the UI is wired up.
   window.__hopdeskReady = true;
 })();

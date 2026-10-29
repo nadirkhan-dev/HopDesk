@@ -161,6 +161,31 @@
   .live-dot { width: 8px; height: 8px; border-radius: 50%; background: var(--ok); flex-shrink: 0; }
   .card { padding: 12px 14px; border-bottom: 1px solid var(--border); }
   .card-head { font-size: 11px; letter-spacing: .08em; color: var(--text-dim); margin-bottom: 8px; }
+
+  /* Administration: a table of installations, which needs more width than the
+     two cards on the home view and so gets a column of its own. */
+  .admin-grid { grid-template-columns: 1fr; max-width: 1040px; }
+  .admin-grid .card-head { display: flex; align-items: center; gap: 8px; }
+  .admin-cards { display: flex; gap: 10px; margin-bottom: 12px; flex-wrap: wrap; }
+  .admin-stat {
+    flex: 1 1 110px; padding: 10px 12px; border: 1px solid var(--border);
+    border-radius: var(--radius); background: var(--surface-2);
+  }
+  .admin-stat-value { font-size: 22px; font-variant-numeric: tabular-nums; }
+  .admin-stat-label { font-size: 11px; letter-spacing: .08em; color: var(--text-dim); }
+  .admin-row {
+    display: grid; gap: 10px; align-items: center; padding: 8px 4px;
+    border-bottom: 1px solid var(--border);
+    grid-template-columns: minmax(150px, 1.4fr) 110px 110px minmax(80px, 1fr) auto;
+  }
+  .admin-row:last-child { border-bottom: 0; }
+  .admin-head { color: var(--text-dim); font-size: 11px; letter-spacing: .08em; }
+  .admin-actions { display: flex; gap: 6px; justify-content: flex-end; }
+  .admin-event { grid-template-columns: 90px minmax(120px, 1fr) 170px minmax(80px, 1fr); }
+  @media (max-width: 760px) {
+    .admin-row, .admin-event { grid-template-columns: 1fr; }
+    .admin-actions { justify-content: flex-start; }
+  }
   .card .row { display: flex; align-items: center; gap: 8px; margin-bottom: 10px; }
   .card .field { margin-bottom: 8px; }
   .card label { display: block; font-size: 12px; color: var(--text-dim); margin-bottom: 3px; }
@@ -404,6 +429,7 @@
   </div>
   <div class="spacer"></div>
   <button class="btn ghost" id="btn-discover" title="Look for computers that announce screen sharing on this network">Find on network</button>
+  <button class="btn ghost" id="btn-admin" aria-label="Admin">Admin</button>
   <button class="btn ghost" id="btn-settings" aria-label="Settings">Settings</button>
   <button class="btn primary" id="btn-new">Add computer</button>
 </header>
@@ -525,6 +551,62 @@
   </section>
 
   <!-- A live HopDesk session: the other computer's screen. -->
+  <!--
+    Administering installations, for whoever runs the authorization service.
+
+    A view rather than a dialog: it is a table with a search box and a panel,
+    and none of that belongs in something you dismiss. The token behind it
+    never reaches this window - every button asks the main process to act.
+  -->
+  <section class="home" id="admin-view" hidden>
+    <div class="home-grid admin-grid">
+      <section class="card" id="admin-signin" hidden>
+        <div class="card-head">SIGN IN AS ADMIN</div>
+        <p class="hint" id="admin-signin-hint">
+          The administrator token for the authorization service. It is kept in this
+          computer's keystore and never shown again.
+        </p>
+        <div class="field" id="admin-service-field" hidden>
+          <label for="admin-service">Service address</label>
+          <input id="admin-service" placeholder="https://hopdesk-auth.example.workers.dev"
+                 autocomplete="off" spellcheck="false">
+        </div>
+        <div class="field">
+          <label for="admin-token">Administrator token</label>
+          <input id="admin-token" type="password" placeholder="hda_…" autocomplete="off" spellcheck="false">
+        </div>
+        <button class="btn primary" id="admin-signin-go">Sign in</button>
+        <p class="error-text" id="admin-signin-error" hidden></p>
+      </section>
+
+      <section class="card" id="admin-main" hidden>
+        <div class="card-head">
+          <span>INSTALLATIONS</span>
+          <span class="spacer"></span>
+          <output class="hint" id="admin-service-name"></output>
+          <button class="btn ghost small" id="admin-refresh">Refresh</button>
+          <button class="btn ghost small" id="admin-signout">Sign out</button>
+        </div>
+        <div class="admin-cards" id="admin-summary"></div>
+        <div class="field">
+          <input id="admin-search" type="search" placeholder="Search by Device ID, status or reason"
+                 aria-label="Search installations">
+        </div>
+        <div id="admin-table" aria-live="polite"></div>
+        <p class="error-text" id="admin-error" hidden></p>
+      </section>
+
+      <section class="card" id="admin-history" hidden>
+        <div class="card-head">
+          <span id="admin-history-title">HISTORY</span>
+          <span class="spacer"></span>
+          <button class="btn ghost small" id="admin-history-close" aria-label="Close history">Close</button>
+        </div>
+        <div id="admin-history-list"></div>
+      </section>
+    </div>
+  </section>
+
   <section class="hd-view" id="hd-view" hidden>
     <header class="hd-bar">
       <strong id="hd-name">Remote computer</strong>
@@ -791,6 +873,22 @@
   <menu>
     <button class="btn" id="keychange-refuse" autofocus>Refuse</button>
     <button class="btn danger" id="keychange-accept">Accept the new key</button>
+  </menu>
+</dialog>
+
+<dialog id="dlg-admin-block" aria-labelledby="admin-block-title">
+  <h2 id="admin-block-title">Disable this installation?</h2>
+  <p class="hint mono" id="admin-block-who"></p>
+  <p>It will stop accepting and making HopDesk connections. A session it is
+    carrying through the relay ends; one on a local network ends when that
+    computer next checks.</p>
+  <div class="field">
+    <label for="admin-block-reason">Reason (shown to the person)</label>
+    <input id="admin-block-reason" placeholder="licence shared" autocomplete="off" maxlength="200">
+  </div>
+  <menu>
+    <button class="btn" id="admin-block-cancel" autofocus>Cancel</button>
+    <button class="btn danger" id="admin-block-ok">Disable it</button>
   </menu>
 </dialog>
 

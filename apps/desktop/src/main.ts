@@ -30,6 +30,7 @@ import {
 import { fingerprint, TrustedDevices } from './trusted.js';
 import { PortalToken } from './portal-token.js';
 import { Authorization, CHECK_INTERVAL_MS, installationIdFor, mayHostWith } from './authorization.js';
+import { AdminClient } from './admin.js';
 import {
   assetFor, feedUrl, isNewer, offerableUrl, readGithubReleases, UPDATE_CHECK_INTERVAL_MS,
   type AvailableUpdate,
@@ -121,6 +122,8 @@ const portalToken = new PortalToken(dataDir);
  * what a build from source is.
  */
 let authorization: Authorization | null = null;
+/** The Admin page's client. Holds the administrator token; never hands it out. */
+let adminClient: AdminClient | null = null;
 let authorizationTimer: NodeJS.Timeout | null = null;
 
 /**
@@ -810,6 +813,16 @@ app.whenReady().then(async () => {
     // VNC and RDP still work, so the app starts and says what is missing.
     log.error(`device identity unavailable: ${(err as Error).message}`);
   }
+
+  /* The Admin page talks to the authorization service through here, so the
+     token stays in the keystore and out of the window. */
+  adminClient = new AdminClient({
+    storage: identityStorage(dataDir),
+    defaultService: AUTH_SERVICE_URL,
+    savedService: () => settings.get().account.adminServiceUrl ?? null,
+    rememberService: url => { void settings.update({ account: { adminServiceUrl: url ?? undefined } }); },
+    log,
+  });
 
   /* Asked on launch and every six hours - never per connection, so a check
      can neither interrupt a session nor be the reason one is slow to start. */
@@ -1654,6 +1667,50 @@ ipcMain.on('viewer:log', (e, text: unknown) => {
   if (!isTrustedFrom(e, [{ contents: window && !window.isDestroyed() ? window.webContents : null, url: UI_URL }])) return;
   if (typeof text !== 'string') return;
   log.info(`viewer: ${text.slice(0, 300)}`);
+});
+
+/* ------------------------------------------------------- administration */
+
+/**
+ * The Admin page, which manages installations on the authorization service.
+ *
+ * Every one of these runs here rather than in the window, because the token is
+ * here. The window sends a Device ID and a reason and is told what happened;
+ * it is never told what authorised it.
+ */
+handle('adminStatus', async () => {
+  if (!adminClient) return { signedIn: false, service: null };
+  return await adminClient.status();
+});
+
+handle('adminSignIn', async (token: string, service?: string) => {
+  if (!adminClient) throw new Error('This computer cannot administer anything yet');
+  return await adminClient.signIn(String(token ?? ''), service ? String(service) : undefined);
+});
+
+handle('adminSignOut', async () => {
+  await adminClient?.signOut();
+  return { ok: true };
+});
+
+handle('adminList', async () => {
+  if (!adminClient) return { ok: false, error: 'no-service' };
+  return await adminClient.list();
+});
+
+handle('adminBlock', async (installationId: string, reason: string) => {
+  if (!adminClient) return { ok: false, error: 'no-service' };
+  return await adminClient.block(String(installationId), String(reason ?? ''));
+});
+
+handle('adminUnblock', async (installationId: string) => {
+  if (!adminClient) return { ok: false, error: 'no-service' };
+  return await adminClient.unblock(String(installationId));
+});
+
+handle('adminHistory', async (installationId: string) => {
+  if (!adminClient) return { ok: false, error: 'no-service' };
+  return await adminClient.history(String(installationId));
 });
 
 /* ---------------------------------------- connecting to another computer */

@@ -68,6 +68,15 @@ contextBridge.exposeInMainWorld('hopdesk', {
   rememberConnectMethod: (deviceId, method) => ipcRenderer.invoke('rememberConnectMethod', deviceId, method),
   answerConsent: (id, decision) => ipcRenderer.invoke('answerConsent', id, decision),
   answerKeyChange: (id, accepted) => ipcRenderer.invoke('answerKeyChange', id, accepted),
+  /* Administration. The token is never passed back across this bridge: it is
+     handed in once at sign-in and lives in the main process from then on. */
+  adminStatus: () => ipcRenderer.invoke('adminStatus'),
+  adminSignIn: (token, service) => ipcRenderer.invoke('adminSignIn', token, service),
+  adminSignOut: () => ipcRenderer.invoke('adminSignOut'),
+  adminList: () => ipcRenderer.invoke('adminList'),
+  adminBlock: (installationId, reason) => ipcRenderer.invoke('adminBlock', installationId, reason),
+  adminUnblock: installationId => ipcRenderer.invoke('adminUnblock', installationId),
+  adminHistory: installationId => ipcRenderer.invoke('adminHistory', installationId),
   updateStatus: () => ipcRenderer.invoke('updateStatus'),
   openUpdatePage: () => ipcRenderer.invoke('openUpdatePage'),
   onUpdateAvailable: handler => {

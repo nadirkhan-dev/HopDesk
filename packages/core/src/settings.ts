@@ -35,6 +35,15 @@ export interface RemoteAccessSettings {
 /** The HopDesk server this computer is signed in to, if any. Not secret. */
 export interface AccountSettings {
   serverUrl?: string;
+  /**
+   * The authorization service being administered from the Admin page.
+   *
+   * Only for a build with none compiled in - a build from source, or a
+   * developer's. An official build knows its own service and ignores this.
+   * Not a secret: an address, beside the token that is one and lives in the
+   * keystore instead.
+   */
+  adminServiceUrl?: string;
   email?: string;
   /**
    * Always carry sessions through the server's relay instead of connecting the
@@ -125,7 +134,10 @@ export class SettingsStore {
     /** Merged, not replaced: one computer's choice never clears another's. */
     connectChoices?: ConnectChoices;
     /** null clears a field, e.g. on sign-out. */
-    account?: { serverUrl?: string | null; email?: string | null; forceRelay?: boolean | null };
+    account?: {
+      serverUrl?: string | null; email?: string | null; forceRelay?: boolean | null;
+      adminServiceUrl?: string | null;
+    };
   }): Promise<AppSettings> {
     this.data.defaults = sanitize({ ...this.data.defaults, ...(patch?.defaults ?? {}) });
     if (patch?.remoteAccess) {
@@ -136,7 +148,7 @@ export class SettingsStore {
     }
     if (patch?.account) {
       const next: Record<string, unknown> = { ...this.data.account };
-      for (const key of ['serverUrl', 'email', 'forceRelay'] as const) {
+      for (const key of ['serverUrl', 'email', 'forceRelay', 'adminServiceUrl'] as const) {
         const value = patch.account[key];
         if (value === null) delete next[key];
         else if (value !== undefined) next[key] = value;
@@ -213,6 +225,9 @@ function sanitizeAccount(input: unknown): AccountSettings {
   if (typeof input !== 'object' || input === null) return out;
   const raw = input as Record<string, unknown>;
   if (typeof raw.serverUrl === 'string' && /^https?:\/\/[^\s]+$/.test(raw.serverUrl)) out.serverUrl = raw.serverUrl.slice(0, 200);
+  if (typeof raw.adminServiceUrl === 'string' && /^https?:\/\/[^\s]+$/.test(raw.adminServiceUrl)) {
+    out.adminServiceUrl = raw.adminServiceUrl.slice(0, 200);
+  }
   if (typeof raw.email === 'string' && raw.email.length <= 254) out.email = raw.email;
   if (typeof raw.forceRelay === 'boolean') out.forceRelay = raw.forceRelay;
   return out;
