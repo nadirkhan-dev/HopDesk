@@ -72,9 +72,20 @@ test('the installed Mac app starts, lists what macOS allows it, and loads its in
     assert.equal(perms[1].state.includes('Not allowed'), accessLogged === 'not allowed', 'window and log disagree on Accessibility');
     console.log(`macOS reports: Screen Recording ${screenLogged}, Accessibility ${accessLogged}`);
 
+    /* An official build will not listen until the authorization service has
+       said it may, so coming online now includes a round trip over the
+       network. Waited for explicitly rather than folded into the timeout
+       below: "it never asked" and "it asked and was refused" are different
+       faults, and under Rosetta the asking alone is not quick. A build with no
+       service configured answers `disabled` at once. */
+    await app.waitFor(
+      `const s = await window.hopdesk.authorizationStatus();
+       return s.state === 'active' || s.state === 'disabled';`,
+      60_000, 'the installed app to be authorized');
+
     /* Remote access on: the host listens, and Quartz loads through koffi. */
     await app.eval(`document.querySelector('#mine-toggle').click(); return true`);
-    await app.waitFor(`return document.querySelector('#mine-state')?.textContent === 'Online'`, 30_000, 'the host to come online');
+    await app.waitFor(`return document.querySelector('#mine-state')?.textContent === 'Online'`, 60_000, 'the host to come online');
     const after = await waitFor(async () => {
       const text = await readFile(logFile, 'utf8');
       return /input ready \(darwin\)|input injection unavailable/.test(text) ? text : null;
