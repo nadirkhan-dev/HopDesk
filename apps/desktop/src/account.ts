@@ -440,6 +440,13 @@ function describe(code: string, detail?: string): string {
     case 'weak-password': return detail ?? 'Choose a longer password.';
     case 'device-claimed': return 'This computer is already enrolled on another account. Remove it there first.';
     case 'unauthorised': return 'Sign in again: this session has expired.';
+    /* A disabled account, said plainly and with the reason if one was given:
+       the person cannot fix this themselves, and leaving them to guess at a
+       server that answers every request with "no" is the worst outcome. */
+    case 'account-disabled':
+      return detail
+        ? `This account has been disabled by whoever runs this server: ${detail}`
+        : 'This account has been disabled by whoever runs this server.';
     case 'reused': return 'You were signed out for safety, because a saved sign-in was used twice.';
     default: return detail ?? `The server refused the request (${code}).`;
   }

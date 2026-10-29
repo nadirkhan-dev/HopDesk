@@ -827,7 +827,14 @@ app.whenReady().then(async () => {
       }
     };
     void check();
-    authorizationTimer = setInterval(() => { void check(); }, CHECK_INTERVAL_MS);
+    /* Overridable only to make the effect of a block observable in a test:
+       six hours is the right interval for a real computer and an impossible
+       one to watch. It cannot be used to escape a block - a longer interval
+       means the answer in hand goes stale, and a stale answer stops hosting
+       rather than permitting it. */
+    const every = Number(process.env.HOPDESK_AUTH_CHECK_INTERVAL_MS);
+    const interval = Number.isFinite(every) && every >= 1000 ? every : CHECK_INTERVAL_MS;
+    authorizationTimer = setInterval(() => { void check(); }, interval);
     authorizationTimer.unref?.();
   }
 

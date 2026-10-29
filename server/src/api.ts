@@ -257,6 +257,22 @@ export class Api {
     const ok = await verifyPassword(body.password, stored);
     if (!account || !ok) return this.send(res, 401, { error: 'bad-credentials' });
 
+    /* Checked when credentials are *issued*, not only when they are used.
+       Every route refuses a blocked account's token, so signing in would have
+       produced a session in which nothing worked and nothing said why - and
+       handing out a credential to an account that has been disabled is the
+       wrong answer even when the credential is useless. Only after the
+       password has been checked, so this reveals nothing about which
+       addresses exist. */
+    if (account.blockedAt !== null) {
+      store.clearThrottle(key);
+      this.deps.log(`a blocked account tried to sign in: ${account.email}`);
+      return this.send(res, 403, {
+        error: 'account-disabled',
+        ...(account.blockedReason ? { detail: account.blockedReason } : {}),
+      });
+    }
+
     store.clearThrottle(key);
     return this.send(res, 200, this.session(account.id, account.email));
   }
@@ -272,6 +288,15 @@ export class Api {
     }
     const account = this.deps.store.accountById(outcome.accountId);
     if (!account) return this.send(res, 401, { error: 'invalid' });
+    /* And a session already in hand cannot be renewed past a block, which is
+       what would otherwise let a blocked account keep going for as long as it
+       kept refreshing. */
+    if (account.blockedAt !== null) {
+      return this.send(res, 403, {
+        error: 'account-disabled',
+        ...(account.blockedReason ? { detail: account.blockedReason } : {}),
+      });
+    }
     return this.send(res, 200, {
       account: { id: account.id, email: account.email },
       accessToken: this.accessToken(account.id),

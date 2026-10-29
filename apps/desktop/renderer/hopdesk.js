@@ -636,10 +636,14 @@ export function initHopdesk({ api, toast, confirmDialog }) {
     banner.className = 'banner';
     banner.replaceChildren();
     const text = document.createElement('span');
-    text.textContent = `HopDesk ${update.version} is available. `;
+    /* Worded so it cannot be mistaken for an update that has been applied, or
+       one that is about to be: HopDesk does not install anything, and a person
+       who believes otherwise will not go and get it. */
+    text.textContent = `HopDesk ${update.version} is available. This copy does not update `
+      + 'itself — the button opens the download page. ';
     const open = document.createElement('button');
     open.className = 'btn ghost small';
-    open.textContent = 'See what is new';
+    open.textContent = 'Open the download page';
     open.onclick = () => { void api.openUpdatePage?.(); };
     banner.append(text, open);
     banner.hidden = false;

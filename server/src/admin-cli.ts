@@ -19,6 +19,8 @@
  *   hopdesk-admin block HD-XXXX-XXXX "sharing the licence"
  *   hopdesk-admin unblock HD-XXXX-XXXX
  *   hopdesk-admin history HD-XXXX-XXXX
+ *   hopdesk-admin block-account someone@example.com "not paid"
+ *   hopdesk-admin unblock-account someone@example.com
  *   hopdesk-admin service-key
  *
  * The token it prints is shown once and stored only as a hash. Losing it means
@@ -33,6 +35,9 @@ import { Store } from './store.js';
    recognised. */
 const hash = (token: string) => createHash('sha256').update(token).digest('base64');
 
+/** Marks the half of the key that is safe to put in a build. See service-key. */
+const PUBLIC_KEY_PREFIX = 'hdpk_';
+
 function usage(): never {
   process.stderr.write(`hopdesk-admin — administer this HopDesk server
 
@@ -40,6 +45,8 @@ function usage(): never {
   list                              every installation and device, with status
   block <installation-id> [reason]  disable an installation
   unblock <installation-id>         let it run again
+  block-account <email> [reason]    disable an account and every computer on it
+  unblock-account <email>           let the account in again
   history <installation-id>         what was done to it, and by whom
   service-key                      the public key a build must be made with
 
@@ -81,8 +88,11 @@ function main(): void {
       }
       process.stdout.write(`\n${devices.length} account device(s):\n`);
       for (const d of devices) {
-        const status = d.blockedAt !== null ? 'blocked' : (d.approved ? 'active' : 'waiting for approval');
-        process.stdout.write(`  ${d.deviceId}  ${d.name.padEnd(24)} ${status}\n`);
+        const account = store.accountById(d.accountId);
+        const status = d.blockedAt !== null ? 'blocked'
+          : account?.blockedAt != null ? 'blocked with its account'
+            : (d.approved ? 'active' : 'waiting for approval');
+        process.stdout.write(`  ${d.deviceId}  ${d.name.padEnd(24)} ${(account?.email ?? '?').padEnd(28)} ${status}\n`);
       }
       break;
     }
@@ -127,13 +137,54 @@ function main(): void {
           + 'Set it in .env (openssl rand -base64 48) and restart the server first.\n');
         process.exit(1);
       }
-      const publicKey = toBase64(identityFromSecretKey(config.authSigningKey).publicKey);
+      /* Printed with a prefix, and accepted only with it by the build script.
+         The signing key and the public key are both 32 bytes of base64, and
+         the one mistake that must not be possible is pasting the signing key
+         into a build - it would ship the server's private half to every user,
+         silently and irrecoverably. A prefix only the public half is ever
+         given makes that a refusal instead of a disaster. */
+      const publicKey = `${PUBLIC_KEY_PREFIX}${toBase64(identityFromSecretKey(config.authSigningKey).publicKey)}`;
       process.stdout.write(`${publicKey}\n\n`
         + 'Build HopDesk against this server with:\n\n'
         + `  HOPDESK_AUTH_URL=https://your-server.example.com \\\n`
         + `  HOPDESK_AUTH_PUBLIC_KEY=${publicKey} \\\n`
         + '    node apps/desktop/scripts/write-build-config.mjs\n\n'
-        + 'It verifies answers and cannot produce them, so it is safe to copy about.\n');
+        + 'This key verifies answers and cannot produce them, so it is safe to copy about,\n'
+        + 'to paste into a build, and to publish. HOPDESK_AUTH_SIGNING_KEY is the half that\n'
+        + 'must never leave this server.\n');
+      break;
+    }
+
+    /* Blocking a person rather than a computer. Decisive for anything through
+       this server: every computer on the account loses the relay at once, and
+       none of them can sign in again. It does not reach a session between two
+       computers on one local network - that is what blocking an installation
+       is for. */
+    case 'block-account':
+    case 'unblock-account': {
+      const email = args[0];
+      if (!email) usage();
+      const account = store.accountByEmail(email);
+      if (!account) {
+        process.stderr.write(`No account with the address ${email}.\n`);
+        process.exit(1);
+      }
+      const devices = store.devicesOfAccount(account.id);
+      const reason = args.slice(1).join(' ') || null;
+      if (command === 'block-account') {
+        store.blockAccount(account.id, now, reason, 'cli');
+        store.recordAdminEvent('cli', 'block-account', account.id, reason, now);
+        for (const device of devices) store.recordEvent('cli', 'block-by-account', device.deviceId, reason, now);
+        process.stdout.write(`${email} is blocked, with ${devices.length} computer(s) on it.\n\n`
+          + 'None of them can sign in or reach the relay. The connections they are holding\n'
+          + 'are closed by the server within half a minute, and the relayed sessions end with\n'
+          + 'them. Sessions on a local network are not reached by this - block the\n'
+          + 'installations for that.\n');
+      } else {
+        store.unblockAccount(account.id);
+        store.recordAdminEvent('cli', 'unblock-account', account.id, reason, now);
+        process.stdout.write(`${email} may sign in again. Its computers reconnect by themselves.\n`);
+      }
       break;
     }
 

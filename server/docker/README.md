@@ -151,8 +151,21 @@ signature without the other one:
 docker compose exec server npm run admin -- service-key
 ```
 
-That prints the key and the command to build with it. It verifies answers and
-cannot produce them, so it is not a secret.
+That prints an `hdpk_…` key and the command to build with it. It verifies
+answers and cannot produce them, so it is not a secret. The prefix is checked
+by the build script: both halves are 32 bytes of base64, and refusing anything
+without it is what stops the signing half being pasted into a build and handed
+to every user.
+
+Blocking a person rather than a computer, and the rest of the day-to-day:
+
+```bash
+docker compose exec server npm run admin -- block-account someone@example.com "not paid"
+docker compose exec server npm run admin -- unblock-account someone@example.com
+```
+
+[docs/DEPLOYMENT.md](../../docs/DEPLOYMENT.md) is the whole arrangement in one
+place: the key's two halves, the two build secrets, and what to run.
 
 The same things over HTTP, with the token:
 
