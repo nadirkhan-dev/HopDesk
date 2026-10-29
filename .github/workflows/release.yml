@@ -27,6 +27,11 @@ on:
         required: false
         type: boolean
         default: true
+      prerelease:
+        description: "Publish as a pre-release"
+        required: false
+        type: boolean
+        default: false
   # Called by auto-release.yml after a push to main has passed CI. One build
   # definition, two ways in: a release made by hand from a tag, and one made
   # automatically, must be the same packages built the same way, or the
@@ -46,6 +51,11 @@ on:
         required: false
         type: boolean
         default: false
+      publish:
+        description: "Publish the release (off: build and check, publish nothing)"
+        required: false
+        type: boolean
+        default: true
       title:
         description: "Release title; defaults to HopDesk <tag>"
         required: false
@@ -290,10 +300,12 @@ jobs:
     name: Publish the release
     needs: [linux, macos]
     # success(): a custom condition otherwise replaces "only if every build passed".
-    # A called run always publishes: the caller only calls when it means to.
-    if: >-
-      success() && (github.event_name == 'push' || github.event_name == 'workflow_call'
-      || inputs.publish)
+    # `inputs.publish` rather than the event: inside a called workflow
+    # `github.event_name` is whatever triggered the *caller* - workflow_run, in
+    # the automatic case - and never 'workflow_call'. Keying on that skipped
+    # publishing entirely while every build passed, which is a failure that
+    # looks exactly like success.
+    if: success() && (github.event_name == 'push' || inputs.publish)
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/download-artifact@v4
